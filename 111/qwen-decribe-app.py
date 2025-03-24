@@ -10,7 +10,7 @@ except ImportError:
     ModelClass = AutoModelForCausalLM
     print("Using generic AutoModelForCausalLM class")
 
-from qwen_vl_utils import process_vision_info
+from qwen import process_vision_info
 from PIL import Image
 import numpy as np
 import os
