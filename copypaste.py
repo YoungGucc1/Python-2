@@ -1,6 +1,7 @@
 import sys
 import json
 import os
+import sqlite3
 from datetime import datetime
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                             QListWidget, QListWidgetItem, QPushButton, QTabWidget, 
@@ -9,9 +10,113 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
 from PyQt6.QtGui import QIcon, QKeySequence, QColor, QFont, QFontMetrics, QShortcut
 from PyQt6.QtCore import Qt, QSize, QTimer, QMimeData
 import pyperclip
+import pyautogui
+import time
+
+class DatabaseManager:
+    def __init__(self):
+        # Get database path
+        if sys.platform == "win32":
+            data_dir = os.path.join(os.getenv("APPDATA"), "ClipboardManager")
+        else:
+            data_dir = os.path.join(os.path.expanduser("~"), ".clipboardmanager")
+        
+        # Create directory if it doesn't exist
+        if not os.path.exists(data_dir):
+            os.makedirs(data_dir)
+        
+        self.db_path = os.path.join(data_dir, "clipboard.db")
+        self.init_database()
+    
+    def init_database(self):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS clipboard_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    text TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    favorite BOOLEAN NOT NULL DEFAULT 0,
+                    hotkey TEXT
+                )
+            ''')
+            conn.commit()
+    
+    def add_item(self, text, timestamp=None, favorite=False, hotkey=None):
+        if timestamp is None:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO clipboard_items (text, timestamp, favorite, hotkey)
+                VALUES (?, ?, ?, ?)
+            ''', (text, timestamp, favorite, hotkey))
+            conn.commit()
+            return cursor.lastrowid
+    
+    def get_all_items(self):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM clipboard_items ORDER BY timestamp DESC')
+            return cursor.fetchall()
+    
+    def update_item(self, item_id, text=None, favorite=None, hotkey=None):
+        updates = []
+        values = []
+        
+        if text is not None:
+            updates.append("text = ?")
+            values.append(text)
+        if favorite is not None:
+            updates.append("favorite = ?")
+            values.append(favorite)
+        if hotkey is not None:
+            updates.append("hotkey = ?")
+            values.append(hotkey)
+        
+        if not updates:
+            return
+        
+        values.append(item_id)
+        query = f'''
+            UPDATE clipboard_items 
+            SET {", ".join(updates)}
+            WHERE id = ?
+        '''
+        
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, values)
+            conn.commit()
+    
+    def delete_item(self, item_id):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM clipboard_items WHERE id = ?', (item_id,))
+            conn.commit()
+    
+    def clear_all(self):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('DELETE FROM clipboard_items')
+            conn.commit()
+    
+    def get_favorites(self):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM clipboard_items WHERE favorite = 1 ORDER BY timestamp DESC')
+            return cursor.fetchall()
+    
+    def get_item_by_id(self, item_id):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM clipboard_items WHERE id = ?', (item_id,))
+            return cursor.fetchone()
 
 class ClipboardItem:
-    def __init__(self, text, timestamp=None, favorite=False):
+    def __init__(self, text, timestamp=None, favorite=False, item_id=None):
+        self.id = item_id
         self.text = text
         self.timestamp = timestamp or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.favorite = favorite
@@ -19,6 +124,7 @@ class ClipboardItem:
     
     def to_dict(self):
         return {
+            "id": self.id,
             "text": self.text,
             "timestamp": self.timestamp,
             "favorite": self.favorite,
@@ -27,7 +133,7 @@ class ClipboardItem:
     
     @classmethod
     def from_dict(cls, data):
-        item = cls(data["text"], data["timestamp"], data["favorite"])
+        item = cls(data["text"], data["timestamp"], data["favorite"], data.get("id"))
         item.hotkey = data.get("hotkey")
         return item
 
@@ -135,6 +241,57 @@ class ClipboardItemWidget(QWidget):
         layout.setContentsMargins(5, 5, 5, 5)  # Increase margins
         layout.setSpacing(10)  # Increase spacing
         
+        # Left side buttons layout
+        left_buttons = QHBoxLayout()
+        left_buttons.setSpacing(5)
+        
+        # Star button (on left)
+        self.star_btn = QPushButton("★")
+        self.star_btn.setToolTip("Add to favorites")
+        self.star_btn.setFixedSize(30, 30)  # Smaller button
+        self.star_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.star_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #34495E;
+                color: #7F8C8D;
+                font-size: 18px;
+                font-weight: bold;
+                border-radius: 15px;
+                padding: 2px;
+            }
+            QPushButton:hover {
+                background-color: #2980B9;
+                color: white;
+            }
+        """)
+        self.star_btn.clicked.connect(self.add_to_favorites)
+        left_buttons.addWidget(self.star_btn)
+        
+        # Delete button (also on left)
+        self.delete_btn = QPushButton("×")
+        self.delete_btn.setToolTip("Delete item")
+        self.delete_btn.setFixedSize(30, 30)  # Smaller button
+        self.delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.delete_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #34495E;
+                color: #E74C3C;
+                font-size: 18px;
+                font-weight: bold;
+                border-radius: 15px;
+                padding: 2px;
+            }
+            QPushButton:hover {
+                background-color: #E74C3C;
+                color: white;
+            }
+        """)
+        self.delete_btn.clicked.connect(self.delete_item)
+        left_buttons.addWidget(self.delete_btn)
+        
+        # Add left buttons to main layout
+        layout.addLayout(left_buttons, 0)
+        
         # Content layout (for text and timestamp)
         content_layout = QVBoxLayout()
         content_layout.setContentsMargins(0, 0, 0, 0)
@@ -149,28 +306,6 @@ class ClipboardItemWidget(QWidget):
         
         # Add content layout to main layout
         layout.addLayout(content_layout, 1)  # 1 means it can stretch
-        
-        # Star button
-        self.star_btn = QPushButton("★")
-        self.star_btn.setToolTip("Add to favorites")
-        self.star_btn.setFixedSize(40, 40)  # Larger button
-        self.star_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.star_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #34495E;
-                color: #7F8C8D;
-                font-size: 24px;
-                font-weight: bold;
-                border-radius: 20px;
-                padding: 3px;
-            }
-            QPushButton:hover {
-                background-color: #2980B9;
-                color: white;
-            }
-        """)
-        self.star_btn.clicked.connect(self.add_to_favorites)
-        layout.addWidget(self.star_btn, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
     
     def set_text(self, text):
         self.text_label.setText(text)
@@ -181,10 +316,10 @@ class ClipboardItemWidget(QWidget):
                 QPushButton {
                     background-color: #F39C12;
                     color: white;
-                    font-size: 24px;
+                    font-size: 18px;
                     font-weight: bold;
-                    border-radius: 20px;
-                    padding: 3px;
+                    border-radius: 15px;
+                    padding: 2px;
                 }
                 QPushButton:hover {
                     background-color: #D35400;
@@ -197,10 +332,10 @@ class ClipboardItemWidget(QWidget):
                 QPushButton {
                     background-color: #34495E;
                     color: #7F8C8D;
-                    font-size: 24px;
+                    font-size: 18px;
                     font-weight: bold;
-                    border-radius: 20px;
-                    padding: 3px;
+                    border-radius: 15px;
+                    padding: 2px;
                 }
                 QPushButton:hover {
                     background-color: #2980B9;
@@ -212,6 +347,10 @@ class ClipboardItemWidget(QWidget):
     def add_to_favorites(self):
         if self.clipboard_manager and self.item_index is not None:
             self.clipboard_manager.toggle_favorite(self.item_index)
+            
+    def delete_item(self):
+        if self.clipboard_manager and self.item_index is not None:
+            self.clipboard_manager.remove_from_history(self.item_index)
 
 class ClipboardManager(QMainWindow):
     def __init__(self):
@@ -220,6 +359,9 @@ class ClipboardManager(QMainWindow):
         self.setMinimumSize(600, 500)
         self.clipboard_items = []
         self.hotkeys = {}
+        
+        # Initialize database manager
+        self.db = DatabaseManager()
         
         # Set up theme
         self.setup_theme()
@@ -422,8 +564,11 @@ class ClipboardManager(QMainWindow):
                 self.refresh_ui()
                 return
         
-        # Add new item
-        clipboard_item = ClipboardItem(text)
+        # Add new item to database
+        item_id = self.db.add_item(text)
+        
+        # Add new item to memory
+        clipboard_item = ClipboardItem(text, item_id=item_id)
         self.clipboard_items.insert(0, clipboard_item)
         
         # Limit history to 100 items
@@ -431,7 +576,9 @@ class ClipboardManager(QMainWindow):
             # Remove non-favorite items first
             non_favorites = [i for i in self.clipboard_items if not i.favorite]
             if non_favorites:
-                self.clipboard_items.remove(non_favorites[-1])
+                item_to_remove = non_favorites[-1]
+                self.db.delete_item(item_to_remove.id)
+                self.clipboard_items.remove(item_to_remove)
         
         self.refresh_ui()
     
@@ -477,19 +624,21 @@ class ClipboardManager(QMainWindow):
             self.refresh_ui()
             self.statusBar().showMessage("Removed from favorites", 2000)
     
-    def remove_from_history(self):
-        current_item = self.history_list.currentItem()
-        if current_item:
-            index = current_item.data(Qt.ItemDataRole.UserRole)
+    def remove_from_history(self, index):
+        if 0 <= index < len(self.clipboard_items):
+            item = self.clipboard_items[index]
             
             # Clear any hotkey if it's a favorite
-            if self.clipboard_items[index].hotkey:
-                shortcut_seq = self.clipboard_items[index].hotkey
+            if item.hotkey:
+                shortcut_seq = item.hotkey
                 if shortcut_seq in self.hotkeys:
                     self.hotkeys[shortcut_seq].setEnabled(False)
                     del self.hotkeys[shortcut_seq]
             
-            # Remove the item
+            # Remove from database
+            self.db.delete_item(item.id)
+            
+            # Remove from memory
             del self.clipboard_items[index]
             self.refresh_ui()
             self.statusBar().showMessage("Item removed", 2000)
@@ -526,6 +675,9 @@ class ClipboardManager(QMainWindow):
                 
                 clip_item.hotkey = new_hotkey
                 
+                # Update database
+                self.db.update_item(clip_item.id, hotkey=new_hotkey)
+                
                 # Create new shortcut
                 shortcut = QShortcut(QKeySequence(new_hotkey), self)
                 shortcut.activated.connect(lambda item=clip_item: self.activate_hotkey(item))
@@ -534,13 +686,30 @@ class ClipboardManager(QMainWindow):
                 self.statusBar().showMessage(f"Assigned hotkey: {new_hotkey}", 2000)
             else:
                 clip_item.hotkey = None
+                # Update database
+                self.db.update_item(clip_item.id, hotkey=None)
                 self.statusBar().showMessage("Hotkey cleared", 2000)
             
             self.refresh_ui()
     
     def activate_hotkey(self, item):
+        # Store current clipboard content
+        original_clipboard = pyperclip.paste()
+        
+        # Copy the item's text to clipboard
         pyperclip.copy(item.text)
-        self.statusBar().showMessage(f"Hotkey activated: Copied to clipboard", 2000)
+        
+        # Small delay to ensure clipboard is updated
+        time.sleep(0.1)
+        
+        # Simulate Ctrl+V to paste
+        pyautogui.hotkey('ctrl', 'v')
+        
+        # Restore original clipboard content
+        time.sleep(0.1)
+        pyperclip.copy(original_clipboard)
+        
+        self.statusBar().showMessage(f"Hotkey activated: Pasted text", 2000)
     
     def refresh_ui(self):
         # Update history list
@@ -612,41 +781,35 @@ class ClipboardManager(QMainWindow):
         return os.path.join(data_dir, "clipboard_data.json")
     
     def save_data(self):
-        try:
-            # Convert clipboard items to dictionaries
-            data = {
-                "clipboard_items": [item.to_dict() for item in self.clipboard_items]
-            }
-            
-            with open(self.get_data_file_path(), "w") as f:
-                json.dump(data, f, indent=2)
-                
-            self.statusBar().showMessage("Data saved", 2000)
-        except Exception as e:
-            QMessageBox.warning(self, "Error", f"Failed to save data: {str(e)}")
+        # No need to explicitly save as we're using SQLite
+        # Data is saved immediately when changes occur
+        pass
     
     def load_data(self):
         try:
-            if os.path.exists(self.get_data_file_path()):
-                with open(self.get_data_file_path(), "r") as f:
-                    data = json.load(f)
+            # Clear existing data
+            self.clipboard_items = []
+            
+            # Load items from database
+            db_items = self.db.get_all_items()
+            for item_data in db_items:
+                item = ClipboardItem(
+                    text=item_data[1],
+                    timestamp=item_data[2],
+                    favorite=bool(item_data[3]),
+                    item_id=item_data[0]
+                )
+                item.hotkey = item_data[4]
+                self.clipboard_items.append(item)
                 
-                # Clear existing data
-                self.clipboard_items = []
-                
-                # Load clipboard items
-                for item_data in data.get("clipboard_items", []):
-                    item = ClipboardItem.from_dict(item_data)
-                    self.clipboard_items.append(item)
-                    
-                    # Set up hotkeys for favorite items
-                    if item.favorite and item.hotkey:
-                        shortcut = QShortcut(QKeySequence(item.hotkey), self)
-                        shortcut.activated.connect(lambda i=item: self.activate_hotkey(i))
-                        self.hotkeys[item.hotkey] = shortcut
-                
-                self.refresh_ui()
-                self.statusBar().showMessage("Data loaded", 2000)
+                # Set up hotkeys for favorite items
+                if item.favorite and item.hotkey:
+                    shortcut = QShortcut(QKeySequence(item.hotkey), self)
+                    shortcut.activated.connect(lambda i=item: self.activate_hotkey(i))
+                    self.hotkeys[item.hotkey] = shortcut
+            
+            self.refresh_ui()
+            self.statusBar().showMessage("Data loaded", 2000)
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to load data: {str(e)}")
     
@@ -748,7 +911,10 @@ class ClipboardManager(QMainWindow):
         )
         
         if reply == QMessageBox.StandardButton.Yes:
-            # Clear all data
+            # Clear all data from database
+            self.db.clear_all()
+            
+            # Clear all data from memory
             self.clipboard_items = []
             
             # Clear all hotkeys
@@ -760,13 +926,16 @@ class ClipboardManager(QMainWindow):
             self.statusBar().showMessage("All data cleared", 2000)
     
     def closeEvent(self, event):
-        self.save_data()  # Save on exit
+        # No need to save on exit as we're using SQLite
         event.accept()
 
     def toggle_favorite(self, index):
         # Toggle favorite status
         item = self.clipboard_items[index]
         item.favorite = not item.favorite
+        
+        # Update database
+        self.db.update_item(item.id, favorite=item.favorite)
         
         self.refresh_ui()
         
@@ -780,6 +949,7 @@ class ClipboardManager(QMainWindow):
                     self.hotkeys[shortcut_seq].setEnabled(False)
                     del self.hotkeys[shortcut_seq]
                 item.hotkey = None
+                self.db.update_item(item.id, hotkey=None)
             
             self.statusBar().showMessage("Removed from favorites", 2000)
 
