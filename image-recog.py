@@ -52,9 +52,13 @@ except Exception as e:
 from transformers import AutoProcessor, AutoModelForCausalLM
 
 # --- Configuration ---
-MODEL_ID = 'HuggingFaceM4/Florence-2-DocVQA'
+# Model is cached at C:\Users\PC\.cache\huggingface\hub
+HUGGINGFACE_CACHE = os.path.expanduser("C:\\Users\\PC\\.cache\\huggingface\\hub")
+MODEL_ID = "microsoft/Florence-2-large-ft"  # Original model ID
+MODEL_CACHE_PATH = os.path.join(HUGGINGFACE_CACHE, "models--microsoft--Florence-2-large-ft")
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {DEVICE}")
+print(f"Looking for cached model at: {MODEL_CACHE_PATH}")
 
 # --- Model Loading ---
 # Global variables for model and processor (or manage within the App class)
@@ -68,24 +72,77 @@ def load_model_and_processor():
     """Loads the model and processor. To be run in a separate thread."""
     global model, processor
     try:
-        print(f"Loading model '{MODEL_ID}'...")
+        print(f"Starting model loading from: {MODEL_CACHE_PATH}")
+        print(f"Current working directory: {os.getcwd()}")
+        print(f"Checking if cache directory exists: {os.path.exists(MODEL_CACHE_PATH)}")
+        
+        if os.path.exists(MODEL_CACHE_PATH):
+            print(f"Cache directory found! Contents of {MODEL_CACHE_PATH}:")
+            snapshots_dir = os.path.join(MODEL_CACHE_PATH, "snapshots")
+            if os.path.exists(snapshots_dir):
+                print(f"Snapshot directory exists: {snapshots_dir}")
+                snapshot_folders = os.listdir(snapshots_dir)
+                if snapshot_folders:
+                    print(f"Found snapshots: {snapshot_folders}")
+                    # Get the latest snapshot (usually there's just one)
+                    latest_snapshot = os.path.join(snapshots_dir, snapshot_folders[-1])
+                    print(f"Using snapshot: {latest_snapshot}")
+                    
+                    # Load model with appropriate dtype if using CPU or CUDA
+                    dtype = torch.float16 if DEVICE == "cuda" else torch.float32
+                    print("Loading model from snapshot...")
+                    model = AutoModelForCausalLM.from_pretrained(
+                        latest_snapshot,
+                        trust_remote_code=True,
+                        torch_dtype=dtype,
+                        local_files_only=True
+                    ).to(DEVICE).eval()
+                    
+                    print("Loading processor from snapshot...")
+                    processor = AutoProcessor.from_pretrained(
+                        latest_snapshot, 
+                        trust_remote_code=True,
+                        local_files_only=True
+                    )
+                    print(f"Model and processor loaded successfully from cache. Model is None? {model is None}, Processor is None? {processor is None}")
+                    model_loaded_event.set()
+                    print("Set model_loaded_event to True")
+                    return
+                else:
+                    print("No snapshots found in the snapshots directory.")
+            else:
+                print(f"No snapshots directory found in {MODEL_CACHE_PATH}")
+        
+        # If we reach here, we couldn't load from cache directly, try with model ID
+        # This will still use the cache but through Hugging Face's API
+        print(f"Falling back to loading with original model ID: {MODEL_ID}")
+        
         # Load model with appropriate dtype if using CPU or CUDA
         dtype = torch.float16 if DEVICE == "cuda" else torch.float32
+        print("Attempting to load model with model ID...")
         model = AutoModelForCausalLM.from_pretrained(
             MODEL_ID,
             trust_remote_code=True,
-            torch_dtype=dtype # Specify dtype
+            torch_dtype=dtype,
+            cache_dir=HUGGINGFACE_CACHE
         ).to(DEVICE).eval()
 
-        print(f"Loading processor '{MODEL_ID}'...")
-        processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
-        print("Model and processor loaded successfully.")
-        model_loaded_event.set() # Signal that loading is complete
+        print(f"Loading processor with model ID {MODEL_ID}...")
+        processor = AutoProcessor.from_pretrained(
+            MODEL_ID, 
+            trust_remote_code=True,
+            cache_dir=HUGGINGFACE_CACHE
+        )
+        print(f"Model and processor loaded successfully. Model is None? {model is None}, Processor is None? {processor is None}")
+        model_loaded_event.set()
+        print("Set model_loaded_event to True")
     except Exception as e:
         print(f"Error loading model/processor: {e}")
-        # Signal failure? For now, the event just won't be set.
+        import traceback
+        traceback.print_exc()  # Print full stack trace for debugging
         model = None # Ensure model is None if loading failed
         processor = None
+        print("Model or processor is None due to error. Not setting model_loaded_event.")
 
 # --- Worker Thread for Inference ---
 class InferenceWorker(QObject):
@@ -171,7 +228,7 @@ class InferenceWorker(QObject):
 class DocVQAApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Florence-2 DocVQA Batch Processor")
+        self.setWindowTitle(f"Florence-2 DocVQA Batch Processor (HF Cache: {os.path.basename(HUGGINGFACE_CACHE)})")
         self.setGeometry(100, 100, 900, 700) # x, y, width, height
         # Optional: Set an icon (create an icon file like 'icon.png')
         # self.setWindowIcon(QIcon('icon.png'))
@@ -179,6 +236,14 @@ class DocVQAApp(QMainWindow):
         self.selected_files = []
         self.worker_thread = None
         self.inference_worker = None
+        
+        # Create force enable button but don't add it to layout yet
+        self.force_enable_button = QPushButton("Force Enable Processing")
+        self.force_enable_button.clicked.connect(self.force_enable_processing)
+        self.force_enable_button.setVisible(False)
+        self.force_enable_timer = QTimer(self)
+        self.force_enable_timer.timeout.connect(self.check_show_force_enable)
+        self.force_enable_timer.start(15000)  # Show after 15 seconds
 
         # Start loading the model in a background thread
         self.model_loader_thread = threading.Thread(target=load_model_and_processor, daemon=True)
@@ -188,7 +253,7 @@ class DocVQAApp(QMainWindow):
         self._apply_styles() # Apply custom styling
 
         # Initial status
-        self.status_label.setText("Loading model...")
+        self.status_label.setText(f"Loading model from HF cache: {MODEL_CACHE_PATH}...")
         self.start_button.setEnabled(False) # Disable until model is loaded
 
         # Use a timer to check if the model has loaded, then enable the button
@@ -243,6 +308,7 @@ class DocVQAApp(QMainWindow):
 
         control_layout.addWidget(self.start_button)
         control_layout.addWidget(self.stop_button)
+        # The force_enable_button will be added later dynamically if needed
         control_layout.addWidget(self.progress_bar, stretch=1) # Give progress bar more space
         main_layout.addLayout(control_layout)
 
@@ -349,18 +415,45 @@ class DocVQAApp(QMainWindow):
 
     def _check_model_loaded(self):
         """Checks if the model has finished loading."""
+        print(f"Checking if model loaded. Event set: {model_loaded_event.is_set()}, Model exists: {model is not None}, Processor exists: {processor is not None}")
+        
         if model_loaded_event.is_set():
             self.check_model_timer.stop() # Stop checking
-            if model and processor:
+            if model is not None and processor is not None:
                 self.status_label.setText("Model loaded. Ready to process.")
                 self.start_button.setEnabled(True)
+                print("Model and processor loaded successfully. Start button enabled.")
             else:
-                 self.status_label.setText("Error: Model failed to load. Check console.")
-                 QMessageBox.critical(self, "Model Load Error", "Failed to load the AI model. Please check the console output for details and ensure dependencies are installed correctly.")
+                self.status_label.setText("Error: Model failed to load. Check console.")
+                print("ERROR: Model or processor is None despite event being set!")
+                QMessageBox.critical(self, "Model Load Error", "Failed to load the AI model. Please check the console output for details and ensure dependencies are installed correctly.")
+                
+                # Add a force enable button after 10 seconds of waiting
+                if not hasattr(self, '_force_enable_attempts'):
+                    self._force_enable_attempts = 0
+                
+                self._force_enable_attempts += 1
+                if self._force_enable_attempts >= 20:  # After 10 seconds (20 * 500ms)
+                    print("Force enabling start button after timeout...")
+                    self.start_button.setEnabled(True)
+                    self.status_label.setText("WARNING: Force enabled processing, model may not be fully loaded.")
+                    self.check_model_timer.stop()
         else:
-            # Optional: Update status while loading if needed
-            # self.status_label.setText("Loading model...")
-            pass # Keep checking
+            # Update status with more information
+            if not hasattr(self, '_loading_time'):
+                self._loading_time = 0
+            
+            self._loading_time += 0.5  # 500ms interval
+            if self._loading_time % 5 == 0:  # Every 5 seconds
+                self.status_label.setText(f"Still loading model... ({int(self._loading_time)}s)")
+                print(f"Still waiting for model to load after {int(self._loading_time)} seconds.")
+                
+                # After 30 seconds, add option to force enable
+                if self._loading_time >= 30:
+                    print("Loading is taking a long time. Enabling start button...")
+                    self.start_button.setEnabled(True)
+                    self.status_label.setText("WARNING: Load taking too long, try processing but expect errors.")
+                    self.check_model_timer.stop()
 
 
     def select_images(self):
@@ -387,9 +480,29 @@ class DocVQAApp(QMainWindow):
         if not question:
             QMessageBox.warning(self, "No Question", "Please enter a question.")
             return
-        if not model_loaded_event.is_set() or not model or not processor:
-             QMessageBox.critical(self, "Model Not Ready", "The model is not loaded or failed to load.")
-             return
+            
+        # Check if model is ready
+        if not model_loaded_event.is_set():
+            response = QMessageBox.question(
+                self, 
+                "Model Not Ready", 
+                "The model is still loading. Do you want to force start processing anyway?\n\nWARNING: This may cause errors.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if response == QMessageBox.StandardButton.Yes:
+                model_loaded_event.set()  # Force set the event
+                print("User chose to force start processing.")
+            else:
+                return
+                
+        # Even if user forced start, we need to check if model/processor exists
+        if model is None or processor is None:
+            QMessageBox.critical(
+                self, 
+                "Model Not Available", 
+                "The model or processor is not available. Processing cannot start.\n\nPlease check the console for error details."
+            )
+            return
 
 
         # Clear previous results and prepare table
@@ -475,6 +588,35 @@ class DocVQAApp(QMainWindow):
              # self.worker_thread.quit() # Request quit
              self.worker_thread.wait(2000) # Wait max 2 seconds
         event.accept()
+
+    def check_show_force_enable(self):
+        """Check if we should show the force enable button."""
+        if not model_loaded_event.is_set():
+            print("Model loading taking too long. Showing force enable button.")
+            # Add the force enable button to the layout
+            control_layout = None
+            for i in range(self.centralWidget().layout().count()):
+                item = self.centralWidget().layout().itemAt(i)
+                if isinstance(item, QHBoxLayout) and item.indexOf(self.start_button) != -1:
+                    control_layout = item
+                    break
+                
+            if control_layout:
+                control_layout.addWidget(self.force_enable_button)
+                self.force_enable_button.setVisible(True)
+                self.status_label.setText("Model loading taking too long. You can force enable processing.")
+                
+        # Only run once
+        self.force_enable_timer.stop()
+            
+    def force_enable_processing(self):
+        """Force enable the processing button even if the model hasn't loaded."""
+        print("Force enabling processing button.")
+        self.start_button.setEnabled(True)
+        self.force_enable_button.setEnabled(False)
+        self.status_label.setText("WARNING: Processing enabled but model may not be fully loaded!")
+        # Set the event so the app thinks the model is loaded
+        model_loaded_event.set()
 
 
 # --- Run the Application ---
