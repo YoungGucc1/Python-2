@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Three.js Rubik's Cube</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: Arial, sans-serif; }
+        canvas { display: block; }
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0,0,0,0.5);
+            padding: 10px;
+            border-radius: 5px;
+            color: white;
+        }
+        #controls button {
+            display: block;
+            margin: 5px 0;
+            padding: 8px;
+            cursor: pointer;
+        }
+         #info {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            color: #fff;
+            background: rgba(0,0,0,0.5);
+            padding: 5px;
+            border-radius: 3px;
+            font-size: 0.9em;
+         }
+    </style>
+</head>
+<body>
+
+<div id="controls">
+    <button id="rotateF">Rotate Front (F)</button>
+    <button id="rotateFi">Rotate Front' (F')</button>
+    <button id="rotateR">Rotate Right (R)</button>
+    <button id="rotateRi">Rotate Right' (R')</button>
+    <button id="rotateU">Rotate Up (U)</button>
+    <button id="rotateUi">Rotate Up' (U')</button>
+    <button id="rotateB">Rotate Back (B)</button>
+    <button id="rotateBi">Rotate Back' (B')</button>
+    <button id="rotateL">Rotate Left (L)</button>
+    <button id="rotateLi">Rotate Left' (L')</button>
+    <button id="rotateD">Rotate Down (D)</button>
+    <button id="rotateDi">Rotate Down' (D')</button>
+    <hr>
+    <button id="reset">Reset Cube</button>
+    <button id="scramble">Scramble</button>
+</div>
+<div id="info">
+    Use mouse to rotate view. Use buttons to turn faces.
+</div>
+
+<!-- CDN Links - Ensure you have internet access -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tween.js/18.6.4/tween.umd.js"></script>
+
+<script>
+    let scene, camera, renderer, controls;
+    let cubeGroup; // A group to hold all the cubies
+    let cubies = []; // Array to store individual cubie meshes
+    let pivot; // Temporary group for rotation animation
+    let isAnimating = false; // Prevent multiple animations at once
+
+    const CUBE_SIZE = 3; // 3x3x3
+    const CUBIE_SIZE = 1;
+    const CUBIE_SPACING = 0.05; // Small gap between cubies
+    const TOTAL_CUBIE_SIZE = CUBIE_SIZE + CUBIE_SPACING;
+
+    // Standard Rubik's Colors
+    const colors = {
+        front:  0xB90000, // Red
+        back:   0xFF5900, // Orange
+        up:     0xFFFFFF, // White
+        down:   0xFFD500, // Yellow
+        left:   0x009B48, // Green
+        right:  0x0045AD, // Blue
+        inner:  0x303030  // Dark Grey for inside faces
+    };
+
+    // Axis vectors
+    const axisX = new THREE.Vector3(1, 0, 0);
+    const axisY = new THREE.Vector3(0, 1, 0);
+    const axisZ = new THREE.Vector3(0, 0, 1);
+
+    init();
+    animate();
+
+    function init() {
+        // Scene
+        scene = new THREE.Scene();
+        scene.background = new THREE.Color(0xaaaaaa);
+
+        // Camera
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(4, 4, 6);
+        camera.lookAt(scene.position);
+
+        // Renderer
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0x404040, 2); // soft white light
+        scene.add(ambientLight);
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 1.5);
+        directionalLight.position.set(5, 10, 7.5);
+        scene.add(directionalLight);
+
+        // OrbitControls
+        controls = new THREE.OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.1;
+        controls.screenSpacePanning = false; // Keep panning relative to the scene origin
+
+        // Cube Creation
+        cubeGroup = new THREE.Group();
+        createRubiksCube();
+        scene.add(cubeGroup);
+
+        // Pivot for rotations
+        pivot = new THREE.Group();
+        scene.add(pivot); // Add pivot to the scene so its transformations are applied globally
+
+        // Event Listeners
+        window.addEventListener('resize', onWindowResize, false);
+        setupButtonListeners();
+    }
+
+    function createRubiksCube() {
+        // Clear existing cubies if any (for reset)
+        cubies.forEach(cubie => cubeGroup.remove(cubie));
+        cubies = [];
+
+        const geometry = new THREE.BoxGeometry(CUBIE_SIZE, CUBIE_SIZE, CUBIE_SIZE);
+
+        const offset = (CUBE_SIZE - 1) / 2 * TOTAL_CUBIE_SIZE;
+
+        for (let x = 0; x < CUBE_SIZE; x++) {
+            for (let y = 0; y < CUBE_SIZE; y++) {
+                for (let z = 0; z < CUBE_SIZE; z++) {
+                    // Skip the core piece (not visible)
+                    if (x === 1 && y === 1 && z === 1 && CUBE_SIZE === 3) {
+                        continue;
+                    }
+
+                    const materials = [
+                        (x === CUBE_SIZE - 1) ? new THREE.MeshLambertMaterial({ color: colors.right }) : new THREE.MeshLambertMaterial({ color: colors.inner }), // Right face (+X)
+                        (x === 0) ? new THREE.MeshLambertMaterial({ color: colors.left }) : new THREE.MeshLambertMaterial({ color: colors.inner }), // Left face (-X)
+                        (y === CUBE_SIZE - 1) ? new THREE.MeshLambertMaterial({ color: colors.up }) : new THREE.MeshLambertMaterial({ color: colors.inner }), // Up face (+Y)
+                        (y === 0) ? new THREE.MeshLambertMaterial({ color: colors.down }) : new THREE.MeshLambertMaterial({ color: colors.inner }), // Down face (-Y)
+                        (z === CUBE_SIZE - 1) ? new THREE.MeshLambertMaterial({ color: colors.front }) : new THREE.MeshLambertMaterial({ color: colors.inner }), // Front face (+Z)
+                        (z === 0) ? new THREE.MeshLambertMaterial({ color: colors.back }) : new THREE.MeshLambertMaterial({ color: colors.inner }), // Back face (-Z)
+                    ];
+
+                    const cubie = new THREE.Mesh(geometry, materials);
+
+                    // Position the cubie relative to the center of the 3x3x3 grid
+                    cubie.position.set(
+                        (x * TOTAL_CUBIE_SIZE) - offset,
+                        (y * TOTAL_CUBIE_SIZE) - offset,
+                        (z * TOTAL_CUBIE_SIZE) - offset
+                    );
+
+                    // Store original position and orientation for potential reset/state tracking
+                    cubie.userData.originalPosition = cubie.position.clone();
+                    cubie.userData.originalRotation = cubie.rotation.clone();
+
+                    cubeGroup.add(cubie);
+                    cubies.push(cubie);
+                }
+            }
+        }
+    }
+
+    function getCubiesInLayer(axis, layerIndex) {
+        const layerCubies = [];
+        const threshold = TOTAL_CUBIE_SIZE / 2 - 0.01; // Tolerance for floating point comparisons
+
+        // Layer index: -1 for Left/Down/Back, 0 for Middle, 1 for Right/Up/Front
+        const targetPosition = layerIndex * TOTAL_CUBIE_SIZE;
+
+        cubies.forEach(cubie => {
+            let positionComponent;
+            if (axis === 'x') positionComponent = cubie.position.x;
+            else if (axis === 'y') positionComponent = cubie.position.y;
+            else if (axis === 'z') positionComponent = cubie.position.z;
+
+            if (Math.abs(positionComponent - targetPosition) < threshold) {
+                layerCubies.push(cubie);
+            }
+        });
+        return layerCubies;
+    }
+
+    function rotateLayer(axis, layerIndex, direction) {
+        if (isAnimating) return; // Don't start new animation if one is running
+        isAnimating = true;
+        controls.enabled = false; // Disable camera controls during animation
+
+        const layerCubies = getCubiesInLayer(axis, layerIndex);
+
+        // Move pivot to the center of rotation (which is the scene origin for this setup)
+        pivot.position.set(0, 0, 0);
+        pivot.rotation.set(0, 0, 0);
+
+        // Attach the layer's cubies to the pivot
+        layerCubies.forEach(cubie => {
+            // We need to convert cubie's world position to pivot's local space BEFORE attaching
+            // Since pivot is at origin and not rotated initially, this is simple:
+            // However, Three.js's attach() handles this automatically!
+            pivot.attach(cubie);
+        });
+
+        let targetRotation = {};
+        const angle = direction * Math.PI / 2; // 90 degrees in radians
+
+        if (axis === 'x') targetRotation = { x: angle };
+        else if (axis === 'y') targetRotation = { y: angle };
+        else if (axis === 'z') targetRotation = { z: angle };
+
+        new TWEEN.Tween(pivot.rotation)
+            .to(targetRotation, 500) // Animation duration 500ms
+            .easing(TWEEN.Easing.Quadratic.InOut)
+            .onComplete(() => {
+                // Detach cubies and re-add them to the main cube group
+                // Make sure their world matrices are updated before detaching
+                pivot.updateMatrixWorld(); // Ensure pivot's transform is up-to-date
+
+                const tempCubies = [...layerCubies]; // Iterate over a copy
+                tempCubies.forEach(cubie => {
+                     // Get world matrix, apply it, then add back to main group
+                     scene.attach(cubie); // Automatically handles position/rotation preservation
+                });
+
+                // Reset pivot rotation for the next use
+                pivot.rotation.set(0, 0, 0);
+
+                isAnimating = false;
+                controls.enabled = true; // Re-enable camera controls
+            })
+            .start();
+    }
+
+    function setupButtonListeners() {
+        const offset = (CUBE_SIZE - 1) / 2; // Layer indices: -offset to +offset
+
+        // Front Face (Z axis, layer +offset)
+        document.getElementById('rotateF').onclick = () => rotateLayer('z', offset, 1);  // Clockwise
+        document.getElementById('rotateFi').onclick = () => rotateLayer('z', offset, -1); // Counter-Clockwise
+
+        // Back Face (Z axis, layer -offset)
+        document.getElementById('rotateB').onclick = () => rotateLayer('z', -offset, -1); // Clockwise (viewed from front)
+        document.getElementById('rotateBi').onclick = () => rotateLayer('z', -offset, 1); // Counter-Clockwise (viewed from front)
+
+        // Right Face (X axis, layer +offset)
+        document.getElementById('rotateR').onclick = () => rotateLayer('x', offset, 1);
+        document.getElementById('rotateRi').onclick = () => rotateLayer('x', offset, -1);
+
+        // Left Face (X axis, layer -offset)
+        document.getElementById('rotateL').onclick = () => rotateLayer('x', -offset, -1); // Clockwise (viewed from front)
+        document.getElementById('rotateLi').onclick = () => rotateLayer('x', -offset, 1); // Counter-Clockwise (viewed from front)
+
+        // Up Face (Y axis, layer +offset)
+        document.getElementById('rotateU').onclick = () => rotateLayer('y', offset, 1);
+        document.getElementById('rotateUi').onclick = () => rotateLayer('y', offset, -1);
+
+        // Down Face (Y axis, layer -offset)
+        document.getElementById('rotateD').onclick = () => rotateLayer('y', -offset, -1); // Clockwise (viewed from front)
+        document.getElementById('rotateDi').onclick = () => rotateLayer('y', -offset, 1); // Counter-Clockwise (viewed from front)
+
+        // Reset Button
+        document.getElementById('reset').onclick = () => {
+             if (isAnimating) return;
+             console.log("Resetting cube...");
+             // Recreate the cube in its solved state
+             // This is simpler than trying to reverse moves without a proper solver state
+             createRubiksCube();
+
+             // Or, tween back to original positions/rotations (more complex to manage during rotations)
+             /*
+             isAnimating = true; controls.enabled = false;
+             let tweensPending = cubies.length;
+             cubies.forEach(cubie => {
+                 new TWEEN.Tween(cubie.position)
+                     .to(cubie.userData.originalPosition, 500)
+                     .easing(TWEEN.Easing.Quadratic.InOut)
+                     .start();
+                 new TWEEN.Tween(cubie.rotation)
+                     .to(cubie.userData.originalRotation, 500)
+                     .easing(TWEEN.Easing.Quadratic.InOut)
+                     .onComplete(() => {
+                         tweensPending--;
+                         if (tweensPending === 0) {
+                             isAnimating = false; controls.enabled = true;
+                             console.log("Reset complete.");
+                         }
+                     })
+                     .start();
+             });
+             */
+        };
+
+        // Scramble Button
+        document.getElementById('scramble').onclick = () => {
+            if (isAnimating) return;
+            const moves = ['F', 'Fi', 'R', 'Ri', 'U', 'Ui', 'B', 'Bi', 'L', 'Li', 'D', 'Di'];
+            const numScrambleMoves = 20 + Math.floor(Math.random() * 10); // 20-29 moves
+            let currentMove = 0;
+
+            function applyNextScrambleMove() {
+                if (currentMove >= numScrambleMoves || isAnimating) { // Check isAnimating again inside timeout
+                    if (!isAnimating) console.log("Scramble finished.");
+                    return;
+                }
+
+                const move = moves[Math.floor(Math.random() * moves.length)];
+                console.log(`Scramble move ${currentMove + 1}: ${move}`);
+
+                // Map move string to rotateLayer parameters
+                const layerIndex = (CUBE_SIZE - 1) / 2;
+                let axis, index, direction;
+
+                switch (move) {
+                    case 'F': axis = 'z'; index = layerIndex; direction = 1; break;
+                    case 'Fi': axis = 'z'; index = layerIndex; direction = -1; break;
+                    case 'B': axis = 'z'; index = -layerIndex; direction = -1; break;
+                    case 'Bi': axis = 'z'; index = -layerIndex; direction = 1; break;
+                    case 'R': axis = 'x'; index = layerIndex; direction = 1; break;
+                    case 'Ri': axis = 'x'; index = layerIndex; direction = -1; break;
+                    case 'L': axis = 'x'; index = -layerIndex; direction = -1; break;
+                    case 'Li': axis = 'x'; index = -layerIndex; direction = 1; break;
+                    case 'U': axis = 'y'; index = layerIndex; direction = 1; break;
+                    case 'Ui': axis = 'y'; index = layerIndex; direction = -1; break;
+                    case 'D': axis = 'y'; index = -layerIndex; direction = -1; break;
+                    case 'Di': axis = 'y'; index = -layerIndex; direction = 1; break;
+                }
+
+                // Temporarily reduce animation time for scramble
+                const originalDuration = 500;
+                const scrambleDuration = 100; // Faster scramble animation
+
+                 // Call rotateLayer, but manage isAnimating state carefully with timeout
+                if (!isAnimating) {
+                    isAnimating = true;
+                    controls.enabled = false;
+                    const layerCubies = getCubiesInLayer(axis, index);
+                    pivot.position.set(0, 0, 0);
+                    pivot.rotation.set(0, 0, 0);
+                    layerCubies.forEach(c => pivot.attach(c));
+
+                    let targetRotation = {};
+                    const angle = direction * Math.PI / 2;
+                    if (axis === 'x') targetRotation = { x: angle };
+                    else if (axis === 'y') targetRotation = { y: angle };
+                    else if (axis === 'z') targetRotation = { z: angle };
+
+                    new TWEEN.Tween(pivot.rotation)
+                        .to(targetRotation, scrambleDuration)
+                        .easing(TWEEN.Easing.Linear) // Use linear for faster scramble
+                        .onComplete(() => {
+                            pivot.updateMatrixWorld();
+                            const tempCubies = [...layerCubies];
+                            tempCubies.forEach(c => scene.attach(c));
+                            pivot.rotation.set(0, 0, 0);
+
+                            isAnimating = false; // Free up for next move
+                            controls.enabled = true;
+                            currentMove++;
+                            // Schedule the next move slightly delayed
+                            setTimeout(applyNextScrambleMove, 50); // Small delay between moves
+                        })
+                        .start();
+                } else {
+                    // If still animating (shouldn't happen often with timeout), wait longer
+                     setTimeout(applyNextScrambleMove, scrambleDuration + 50);
+                }
+            }
+            console.log("Starting scramble...");
+            applyNextScrambleMove(); // Start the first move
+        };
+    }
+
+    function onWindowResize() {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+        TWEEN.update(); // Update animations
+        controls.update(); // Only required if controls.enableDamping = true
+        renderer.render(scene, camera);
+    }
+
+</script>
+
+</body>
+</html>
