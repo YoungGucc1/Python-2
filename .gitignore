@@ -1,3 +1,5 @@
 ymc/
 models/
 recordings/
+*.pt
+*.txt
