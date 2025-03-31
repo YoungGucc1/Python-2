@@ -8,8 +8,6 @@ from decimal import Decimal
 from django.conf import settings # Use settings for AUTH_USER_MODEL etc.
 from django.db import models, transaction
 from django.db.models import F, Q, Sum, UniqueConstraint # Import Q, Sum, UniqueConstraint
-from django.db.models.signals import post_save, post_delete, m2m_changed # Add signals
-from django.dispatch import receiver # Add signal receiver
 # from django.contrib.auth.models import User # Use settings.AUTH_USER_MODEL instead
 from django.utils.text import slugify
 from django.utils import timezone
@@ -264,30 +262,19 @@ class Product(SoftDeleteModel): # Inherits soft delete
     @property
     def default_variant(self):
         """Returns the explicitly marked default variant, or the first active one as fallback."""
-        # Cache results to avoid repeated queries within the same instance
-        if not hasattr(self, '_default_variant_cache'):
-            # First try to get from prefetched variants if available
-            if hasattr(self, '_prefetched_objects_cache') and 'variants' in self._prefetched_objects_cache:
-                prefetched_variants = [v for v in self.variants.all() if v.is_active]
-                default_variants = [v for v in prefetched_variants if v.is_default]
-                self._default_variant_cache = default_variants[0] if default_variants else (prefetched_variants[0] if prefetched_variants else None)
-            else:
-                # Fall back to database query if not prefetched
-                self._default_variant_cache = self.variants.filter(is_active=True, is_default=True).first() or \
-                                              self.variants.filter(is_active=True).order_by('created_at').first()
-        return self._default_variant_cache
+        # Use prefetch_related('variants') in views/serializers for efficiency
+        default = self.variants.filter(is_active=True, is_default=True).first()
+        if not default:
+            # Fallback if no default is explicitly set
+            default = self.variants.filter(is_active=True).order_by('created_at').first()
+        return default
 
     @property
     def current_price(self):
         """Returns the price of the default variant, if available."""
+        # Use prefetch_related('variants') in views/serializers for efficiency
         variant = self.default_variant
         return variant.current_price if variant else None
-
-    # Add a utility classmethod for common prefetch pattern
-    @classmethod
-    def with_default_variants(cls):
-        """Returns a queryset with variants prefetched for efficient access."""
-        return cls.objects.prefetch_related('variants')
 
 
 # --- Product Variant Model ---
@@ -350,32 +337,12 @@ class ProductVariant(SoftDeleteModel): # Inherits soft delete
     @property
     def total_stock(self):
         """Calculates total stock quantity across all active warehouses."""
-        # First check if we have a cached or annotated value
-        if hasattr(self, '_total_stock_cache'):
-            return self._total_stock_cache
-            
-        # Try to use prefetched stock_levels if available
-        if hasattr(self, '_prefetched_objects_cache') and 'stock_levels' in self._prefetched_objects_cache:
-            total = sum(stock.quantity for stock in self.stock_levels.all() if not stock.is_deleted)
-            self._total_stock_cache = total
-            return total
-            
-        # Fall back to database aggregation
+        # WARNING: Can cause N+1 queries if used in loops without prefetch_related('stock_levels')
+        # Consider calculating this via annotation in querysets where possible
+        # Or adding a denormalized field if performance is critical
+        # Filters by active warehouses implicitly via Stock model's default manager
         total = self.stock_levels.aggregate(total_quantity=Sum('quantity'))['total_quantity']
-        self._total_stock_cache = total or 0
-        return self._total_stock_cache
-        
-    # Add a classmethod for efficient stock annotation
-    @classmethod
-    def with_stock_levels(cls):
-        """Returns a queryset with stock levels prefetched for efficient access."""
-        return cls.objects.prefetch_related('stock_levels')
-        
-    @classmethod
-    def annotate_total_stock(cls, queryset=None):
-        """Annotates the queryset with total_stock to avoid N+1 queries."""
-        qs = queryset if queryset is not None else cls.objects.all()
-        return qs.annotate(_total_stock_cache=Sum('stock_levels__quantity'))
+        return total or 0
 
 
 # --- Warehouse Model ---
@@ -646,20 +613,6 @@ class Sale(SoftDeleteModel): # Inherits soft delete (allows cancelling/hiding or
 
     notes = models.TextField(blank=True, null=True, help_text="Internal notes or customer comments")
 
-    # Add denormalized fields for critical totals
-    subtotal_amount = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'), 
-                                     help_text="Cached sum of all line items after item discounts")
-    total_amount_cached = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'),
-                                       help_text="Cached final total amount (subtotal - discounts + shipping)")
-    tax_amount_cached = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'),
-                                     help_text="Cached tax amount based on total and tax percentage")
-    acquiring_amount_cached = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'),
-                                           help_text="Cached acquiring fee amount based on total and percentage")
-    commission_amount_cached = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'),
-                                            help_text="Cached commission amount based on total and percentage")
-    net_revenue_cached = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'),
-                                      help_text="Cached net revenue after all deductions")
-
     class Meta(SoftDeleteModel.Meta):
         verbose_name = "Sale / Order"
         verbose_name_plural = "Sales / Orders"
@@ -687,89 +640,23 @@ class Sale(SoftDeleteModel): # Inherits soft delete (allows cancelling/hiding or
 
         # Address assignment/cloning should happen *before* calling save in the view/service
         super().save(*args, **kwargs)
-        
-    def update_totals(self):
-        """Updates all denormalized total fields based on current items."""
-        # This should be called whenever items are added/modified/removed
-        # Calculate subtotal from items
-        items_total = sum(item.line_total for item in self.items.all() if item.line_total is not None)
-        self.subtotal_amount = items_total.quantize(Decimal('0.01')) if items_total is not None else Decimal('0.00')
-        
-        # Calculate total amount 
-        self.total_amount_cached = (self.subtotal_amount - self.discount_amount + self.shipping_cost).quantize(Decimal('0.01'))
-        
-        # Calculate deductions
-        if self.tax_percentage > 0:
-            self.tax_amount_cached = (self.total_amount_cached * (self.tax_percentage / Decimal('100'))).quantize(Decimal('0.01'))
-        else:
-            self.tax_amount_cached = Decimal('0.00')
-            
-        if self.acquiring_percentage > 0:
-            self.acquiring_amount_cached = (self.total_amount_cached * (self.acquiring_percentage / Decimal('100'))).quantize(Decimal('0.01'))
-        else:
-            self.acquiring_amount_cached = Decimal('0.00')
-            
-        if self.commission_percentage > 0:
-            self.commission_amount_cached = (self.total_amount_cached * (self.commission_percentage / Decimal('100'))).quantize(Decimal('0.01'))
-        else:
-            self.commission_amount_cached = Decimal('0.00')
-            
-        # Calculate net revenue
-        total_deductions = self.tax_amount_cached + self.acquiring_amount_cached + self.commission_amount_cached
-        self.net_revenue_cached = (self.total_amount_cached - total_deductions).quantize(Decimal('0.01'))
-        
-        # Update the fields without triggering full save hooks
-        type(self).objects.filter(pk=self.pk).update(
-            subtotal_amount=self.subtotal_amount,
-            total_amount_cached=self.total_amount_cached,
-            tax_amount_cached=self.tax_amount_cached,
-            acquiring_amount_cached=self.acquiring_amount_cached,
-            commission_amount_cached=self.commission_amount_cached,
-            net_revenue_cached=self.net_revenue_cached
-        )
 
     # --- Calculated Properties ---
+    # WARNING: These can cause N+1 queries. Use prefetch_related('items') on Sale querysets.
     @property
     def subtotal(self):
         """Calculates the subtotal from all sale items *after* item-level discounts."""
-        # Use cached value if available
-        if self.subtotal_amount and not self.subtotal_amount.is_zero():
-            return self.subtotal_amount
-            
-        # If not yet calculated or zero, recalculate
-        # First try using prefetched items if available
-        if hasattr(self, '_prefetched_objects_cache') and 'items' in self._prefetched_objects_cache:
-            total = sum(item.line_total for item in self.items.all() if item.line_total is not None)
-            return total.quantize(Decimal('0.01')) if total is not None else Decimal('0.00')
-        
-        # Calculate with one query if items aren't prefetched
-        items_total = self.items.aggregate(
-            total=Sum(F('quantity') * F('price_at_sale') - F('discount_amount'))
-        )['total']
-        return items_total.quantize(Decimal('0.01')) if items_total is not None else Decimal('0.00')
+        total = sum(item.line_total for item in self.items.all() if item.line_total is not None)
+        return total.quantize(Decimal('0.01')) if total is not None else Decimal('0.00')
 
     @property
     def total_amount(self):
         """Calculates the final amount paid by the customer (subtotal - order discounts + shipping)."""
-        # Use cached value if available
-        if self.total_amount_cached and not self.total_amount_cached.is_zero():
-            return self.total_amount_cached
-            
-        # If not yet calculated or zero, recalculate
         return (self.subtotal - self.discount_amount + self.shipping_cost).quantize(Decimal('0.01'))
-    
-    # Add method to efficiently prefetch related items
-    @classmethod
-    def with_items(cls):
-        """Returns a queryset with items prefetched for efficient calculations."""
-        return cls.objects.prefetch_related('items')
 
     @property
     def tax_deduction(self):
         """Calculates the tax amount based on the total amount."""
-        if hasattr(self, 'tax_amount_cached') and self.tax_amount_cached:
-            return self.tax_amount_cached
-            
         if self.tax_percentage > 0:
             return (self.total_amount * (self.tax_percentage / Decimal('100'))).quantize(Decimal('0.01'))
         return Decimal('0.00')
@@ -777,9 +664,6 @@ class Sale(SoftDeleteModel): # Inherits soft delete (allows cancelling/hiding or
     @property
     def acquiring_deduction(self):
         """Calculates the acquiring fee based on the total amount."""
-        if hasattr(self, 'acquiring_amount_cached') and self.acquiring_amount_cached:
-            return self.acquiring_amount_cached
-            
         if self.acquiring_percentage > 0:
             return (self.total_amount * (self.acquiring_percentage / Decimal('100'))).quantize(Decimal('0.01'))
         return Decimal('0.00')
@@ -787,9 +671,6 @@ class Sale(SoftDeleteModel): # Inherits soft delete (allows cancelling/hiding or
     @property
     def commission_deduction(self):
         """Calculates the commission based on the total amount."""
-        if hasattr(self, 'commission_amount_cached') and self.commission_amount_cached:
-            return self.commission_amount_cached
-            
         if self.commission_percentage > 0:
             return (self.total_amount * (self.commission_percentage / Decimal('100'))).quantize(Decimal('0.01'))
         return Decimal('0.00')
@@ -797,17 +678,11 @@ class Sale(SoftDeleteModel): # Inherits soft delete (allows cancelling/hiding or
     @property
     def total_deductions(self):
         """Calculates the sum of all seller-side deductions."""
-        if all(hasattr(self, attr) for attr in ['tax_amount_cached', 'acquiring_amount_cached', 'commission_amount_cached']):
-            return (self.tax_amount_cached + self.acquiring_amount_cached + self.commission_amount_cached).quantize(Decimal('0.01'))
-            
         return (self.tax_deduction + self.acquiring_deduction + self.commission_deduction).quantize(Decimal('0.01'))
 
     @property
     def net_revenue(self):
         """Calculates the revenue remaining after all deductions."""
-        if hasattr(self, 'net_revenue_cached') and self.net_revenue_cached:
-            return self.net_revenue_cached
-            
         return (self.total_amount - self.total_deductions).quantize(Decimal('0.01'))
 
     def __str__(self):
@@ -885,11 +760,6 @@ class Cart(BaseModel): # Carts are typically ephemeral, maybe no soft delete nee
     )
     # Store session key for anonymous users
     session_key = models.CharField(max_length=40, null=True, blank=True, db_index=True)
-    # Denormalized fields for performance
-    item_count = models.PositiveIntegerField(default=0, help_text="Total items in cart")
-    total_price_cached = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'),
-                                         help_text="Cached total price of cart")
-    last_updated = models.DateTimeField(auto_now=True, help_text="Last time cart was updated")
     # Could add status ('active', 'merged', 'ordered', 'abandoned')
 
     class Meta(BaseModel.Meta):
@@ -904,72 +774,24 @@ class Cart(BaseModel): # Carts are typically ephemeral, maybe no soft delete nee
         elif self.session_key:
             return f"Anonymous Cart ({self.session_key})"
         return f"Cart {self.id}"
-        
-    def update_cart_totals(self):
-        """Updates the denormalized cart total fields."""
-        # Get the latest count from the database
-        count_result = self.items.aggregate(total_items=Sum('quantity'))
-        self.item_count = count_result['total_items'] or 0
-        
-        # Calculate the total price (requires one join)
-        total = Decimal('0.00')
-        for item in self.items.select_related('product_variant'):
-            total += item.line_total
-            
-        self.total_price_cached = total.quantize(Decimal('0.01'))
-        
-        # Update without triggering save hooks
-        type(self).objects.filter(pk=self.pk).update(
-            item_count=self.item_count,
-            total_price_cached=self.total_price_cached,
-            last_updated=timezone.now()
-        )
 
     @property
     def total_items(self):
         """ Returns the total number of individual items in the cart. """
-        # Use cached value if available
-        if hasattr(self, 'item_count') and self.item_count is not None:
-            return self.item_count
-            
-        # Calculate from database if needed
+        # WARNING: Potential N+1 query. Use prefetch_related('items') or aggregate.
+        # return sum(item.quantity for item in self.items.all())
         result = self.items.aggregate(total_quantity=Sum('quantity'))
         return result['total_quantity'] or 0
 
     @property
     def total_price(self):
         """ Calculates the total price of all items in the cart using current variant prices. """
-        # Use cached value if available
-        if hasattr(self, 'total_price_cached') and self.total_price_cached is not None:
-            return self.total_price_cached
-            
-        # Check if we have prefetched cart items
-        if hasattr(self, '_prefetched_objects_cache') and 'items' in self._prefetched_objects_cache:
-            total = Decimal('0.00')
-            for item in self.items.all():
-                if hasattr(item, '_prefetched_objects_cache') and 'product_variant' in item._prefetched_objects_cache:
-                    # Items and their variants are prefetched
-                    total += item.line_total
-                else:
-                    # Only items are prefetched, not variants
-                    for item in self.items.select_related('product_variant'):
-                        total += item.line_total
-                    break
-            return total.quantize(Decimal('0.01'))
-            
-        # Use select_related to avoid N+1 queries if not prefetched
+        # WARNING: Potential N+1 query. Use prefetch_related('items__product_variant')
         total = Decimal('0.00')
+        # Use select_related('product_variant') for efficiency within the loop
         for item in self.items.select_related('product_variant'):
             total += item.line_total
         return total.quantize(Decimal('0.01'))
-        
-    @classmethod
-    def with_items_and_variants(cls):
-        """Returns a queryset with all related items prefetched."""
-        return cls.objects.prefetch_related(
-            'items', 
-            'items__product_variant'
-        )
 
 class CartItem(BaseModel): # Also likely ephemeral
     """ Represents an item within a shopping cart """
@@ -987,15 +809,7 @@ class CartItem(BaseModel): # Also likely ephemeral
     @property
     def unit_price(self):
         """ Gets the current price of the associated product variant. """
-        # Use cached product_variant if available to avoid extra queries
-        if not hasattr(self, '_product_variant_cache') and self.product_variant_id:
-            # Cache the variant to avoid repeated db lookups
-            self._product_variant_cache = self.product_variant
-            
-        if hasattr(self, '_product_variant_cache') and self._product_variant_cache:
-            return self._product_variant_cache.current_price
-            
-        # Fallback to database query if needed
+        # WARNING: Potential N+1 query if used in loops without select_related('product_variant')
         if self.product_variant:
             return self.product_variant.current_price
         return Decimal('0.00')
@@ -1009,59 +823,5 @@ class CartItem(BaseModel): # Also likely ephemeral
         variant_name = self.product_variant.display_name if self.product_variant else "N/A"
         return f"{self.quantity} x {variant_name} in Cart {self.cart_id}"
 
-
-# --- Add signals for SaleItem to update Sale totals ---
-@receiver([post_save, post_delete], sender='model5.SaleItem')
-def update_sale_totals(sender, instance, **kwargs):
-    """Update the denormalized fields on Sale whenever a SaleItem changes."""
-    if instance.sale_id:
-        try:
-            # Get the sale and update totals
-            sale = instance.sale
-            sale.update_totals()
-        except Exception as e:
-            logger.error(f"Error updating sale totals: {e}")
-
-# --- Add signals for CartItem to update Cart totals ---
-@receiver([post_save, post_delete], sender='model5.CartItem')
-def update_cart_totals(sender, instance, **kwargs):
-    """Update the denormalized fields on Cart whenever a CartItem changes."""
-    if instance.cart_id:
-        try:
-            # Get the cart and update totals
-            cart = instance.cart
-            cart.update_cart_totals()
-        except Exception as e:
-            logger.error(f"Error updating cart totals: {e}")
-            
-# --- Add signals for Stock to update ProductVariant total_stock cache ---
-@receiver([post_save, post_delete], sender='model5.Stock')
-def update_product_variant_stock(sender, instance, **kwargs):
-    """Update the total stock cache when stock levels change."""
-    if instance.product_variant_id:
-        try:
-            # Clear any cached total_stock
-            variant = instance.product_variant
-            if hasattr(variant, '_total_stock_cache'):
-                delattr(variant, '_total_stock_cache')
-                
-            # Could also update a denormalized field if you add one
-            # variant.total_stock_cached = variant.total_stock
-            # variant.save(update_fields=['total_stock_cached'])
-        except Exception as e:
-            logger.error(f"Error updating product variant stock cache: {e}")
-            
-# --- Add signals for ProductVariant to update Product default variant cache ---
-@receiver(post_save, sender='model5.ProductVariant')
-def update_product_default_variant(sender, instance, **kwargs):
-    """Update the default variant cache when a product variant changes."""
-    if instance.product_id and instance.is_default:
-        try:
-            # Clear cache if this variant was set as default
-            product = instance.product
-            if hasattr(product, '_default_variant_cache'):
-                delattr(product, '_default_variant_cache')
-        except Exception as e:
-            logger.error(f"Error updating product default variant cache: {e}")
 
 # --- END OF FILE models.py ---

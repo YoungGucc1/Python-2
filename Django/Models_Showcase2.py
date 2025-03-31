@@ -146,9 +146,8 @@ class Warehouse(BaseModel):
     name2 = models.CharField(max_length=255, blank=True, null=True)
     slug = models.SlugField(max_length=255, unique=True, blank=True)
     description = models.TextField(blank=True, null=True)
-    type = models.CharField(max_length=50, choices=[('physical', 'Physical'), ('virtual', 'Virtual')])
     address = models.TextField()
-    contact_info = models.CharField(max_length=255)
+    contact_info = models.CharField(max_length=255, unique=True, blank=True)
     status = models.CharField(max_length=20, choices=[('active', 'Active'), ('inactive', 'Inactive')])
 
     def save(self, *args, **kwargs):
@@ -182,7 +181,7 @@ class Contragent(BaseModel):
     slug = models.SlugField(max_length=255, unique=True, blank=True)
     phone = models.CharField(max_length=50, blank=True, null=True)
     email = models.EmailField(unique=True)
-    type = models.CharField(max_length=50, choices=[('customer', 'Customer'), ('employee', 'Employee'), ('admin', 'Admin')])
+    type = models.CharField(max_length=50, choices=[('customer', 'Customer'), ('employee', 'Employee'), ('admin', 'Admin'), ('supplier', 'Supplier') ])
     address = models.TextField(blank=True, null=True)
     status = models.CharField(max_length=20, choices=[('active', 'Active'), ('inactive', 'Inactive')])
 
