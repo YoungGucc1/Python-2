@@ -4,3 +4,4 @@ recordings/
 *.pt
 *.txt
 *.sqlite
+dist/
