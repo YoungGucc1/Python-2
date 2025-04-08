@@ -5,8 +5,6 @@ from typing import Optional, List, Tuple, Dict, Any
 import crypto_utils
 import os # Import our crypto functions
 
-DB_FILE = "vault.db"
-
 # --- Determine the absolute path to the directory containing this script ---
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -14,6 +12,12 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_FILE = os.path.join(_SCRIPT_DIR, "vault.db") # <-- Updated line
 
 print(f"Database file location: {DB_FILE}") # Optional: Add print statement for verification
+
+def set_database_path(path: str):
+    """Sets the database file path to use for all operations."""
+    global DB_FILE
+    DB_FILE = path
+    print(f"Database path updated to: {DB_FILE}")
 
 def get_connection():
     """Establishes connection to the SQLite database."""
