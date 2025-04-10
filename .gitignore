@@ -5,3 +5,5 @@ recordings/
 *.txt
 *.sqlite
 dist/
+venv/
+__pycache__/

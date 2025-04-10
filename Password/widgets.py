@@ -3,7 +3,8 @@ import random
 import string
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QDialogButtonBox, QMessageBox, QCheckBox, QSpinBox, QFormLayout, QTextEdit
+    QDialogButtonBox, QMessageBox, QCheckBox, QSpinBox, QFormLayout, QTextEdit,
+    QComboBox
 )
 from PyQt6.QtCore import Qt
 import secrets # Use secrets for password generation
@@ -229,3 +230,167 @@ class PasswordGeneratorDialog(BaseDialog):
     def get_password(self):
         # Return only if generated, otherwise return empty
         return self.generated_password if hasattr(self, 'generated_password') else ""
+
+class AddEditCreditCardDialog(BaseDialog):
+    def __init__(self, parent=None, card_data=None):
+        title = "Edit Credit Card" if card_data else "Add New Credit Card"
+        super().__init__(parent, title)
+        self.card_data = card_data or {} # Store existing data if editing
+
+        self.form_layout = QFormLayout()
+        
+        # Card nickname/identifier
+        self.card_name_input = QLineEdit(self.card_data.get('card_name', ''))
+        self.form_layout.addRow("Card Name:", self.card_name_input)
+        
+        # Card number with visibility toggle and formatting
+        self.card_number_input = QLineEdit(self.card_data.get('card_number', '').replace(' ', ''))
+        self.card_number_input.setEchoMode(QLineEdit.EchoMode.Normal)  # Show by default
+        self.card_number_input.setInputMask("9999 9999 9999 9999;_")  # Format as blocks of 4 digits
+        
+        # Card number visibility toggle
+        self.show_number_button = QPushButton("Hide")  # Initially "Hide" since shown by default
+        self.show_number_button.setCheckable(True)
+        self.show_number_button.setChecked(True)  # Set to checked by default (shown)
+        self.show_number_button.setFixedWidth(60)
+        self.show_number_button.toggled.connect(self.toggle_card_number_visibility)
+        
+        card_number_layout = QHBoxLayout()
+        card_number_layout.addWidget(self.card_number_input)
+        card_number_layout.addWidget(self.show_number_button)
+        
+        self.form_layout.addRow("Card Number:", card_number_layout)
+        
+        # Cardholder name
+        self.cardholder_name_input = QLineEdit(self.card_data.get('cardholder_name', ''))
+        self.form_layout.addRow("Cardholder Name:", self.cardholder_name_input)
+        
+        # Expiry date (MM/YY) with formatting
+        self.expiry_date_input = QLineEdit(self.card_data.get('expiry_date', ''))
+        self.expiry_date_input.setInputMask("99/99;_")  # Format as MM/YY
+        self.expiry_date_input.setPlaceholderText("MM/YY")
+        self.form_layout.addRow("Expiry Date:", self.expiry_date_input)
+        
+        # CVV with visibility toggle and formatting
+        self.cvv_input = QLineEdit(self.card_data.get('cvv', ''))
+        self.cvv_input.setEchoMode(QLineEdit.EchoMode.Normal)  # Show by default
+        self.cvv_input.setInputMask("999;_")  # Accept exactly 3 digits
+        self.cvv_input.setMaxLength(3)  # CVV is 3 digits for most cards
+        
+        # CVV visibility toggle
+        self.show_cvv_button = QPushButton("Hide")  # Initially "Hide" since shown by default
+        self.show_cvv_button.setCheckable(True)
+        self.show_cvv_button.setChecked(True)  # Set to checked by default (shown)
+        self.show_cvv_button.setFixedWidth(60)
+        self.show_cvv_button.toggled.connect(self.toggle_cvv_visibility)
+        
+        cvv_layout = QHBoxLayout()
+        cvv_layout.addWidget(self.cvv_input)
+        cvv_layout.addWidget(self.show_cvv_button)
+        
+        self.form_layout.addRow("CVV:", cvv_layout)
+        
+        # Card type dropdown
+        self.card_type_input = QComboBox()
+        self.card_type_input.addItems(["", "Visa", "Mastercard", "American Express", "Discover", "Other"])
+        if 'card_type' in self.card_data:
+            self.card_type_input.setCurrentText(self.card_data.get('card_type'))
+        self.form_layout.addRow("Card Type:", self.card_type_input)
+        
+        # Notes
+        self.notes_input = QTextEdit(self.card_data.get('notes', ''))
+        self.notes_input.setAcceptRichText(False)
+        self.form_layout.addRow("Notes:", self.notes_input)
+        
+        self.layout.addLayout(self.form_layout)
+        
+        # Save/Cancel buttons
+        self.buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel)
+        self.buttons.accepted.connect(self.validate_and_accept)
+        self.buttons.rejected.connect(self.reject)
+        self.layout.addWidget(self.buttons)
+    
+    def toggle_card_number_visibility(self, checked):
+        """Shows or hides the card number."""
+        if checked:
+            self.card_number_input.setEchoMode(QLineEdit.EchoMode.Normal)
+            self.show_number_button.setText("Hide")
+        else:
+            self.card_number_input.setEchoMode(QLineEdit.EchoMode.Password)
+            self.show_number_button.setText("Show")
+    
+    def toggle_cvv_visibility(self, checked):
+        """Shows or hides the CVV."""
+        if checked:
+            self.cvv_input.setEchoMode(QLineEdit.EchoMode.Normal)
+            self.show_cvv_button.setText("Hide")
+        else:
+            self.cvv_input.setEchoMode(QLineEdit.EchoMode.Password)
+            self.show_cvv_button.setText("Show")
+    
+    def validate_and_accept(self):
+        """Validates the input fields before accepting."""
+        # Check for required fields
+        if not self.card_name_input.text().strip():
+            QMessageBox.warning(self, "Input Error", "Card name cannot be empty.")
+            return
+        
+        # Get clean card number (no spaces)
+        card_number = self.card_number_input.text().replace(' ', '')
+        if not card_number.strip():
+            QMessageBox.warning(self, "Input Error", "Card number cannot be empty.")
+            return
+        
+        # Check if card number has the right number of digits (usually 13-19)
+        if not card_number.isdigit() or len(card_number) < 13 or len(card_number) > 19:
+            QMessageBox.warning(self, "Input Error", "Card number must be 13-19 digits.")
+            return
+        
+        if not self.cardholder_name_input.text().strip():
+            QMessageBox.warning(self, "Input Error", "Cardholder name cannot be empty.")
+            return
+        
+        # Basic validation for expiry date format (MM/YY)
+        expiry = self.expiry_date_input.text().strip()
+        if not expiry or '_' in expiry:  # Check for incomplete input mask
+            QMessageBox.warning(self, "Input Error", "Expiry date must be complete in MM/YY format.")
+            return
+        
+        # Validate month is 01-12
+        try:
+            month, year = expiry.split('/')
+            if not (1 <= int(month) <= 12):
+                QMessageBox.warning(self, "Input Error", "Month must be between 01 and 12.")
+                return
+        except (ValueError, IndexError):
+            QMessageBox.warning(self, "Input Error", "Expiry date must be in MM/YY format.")
+            return
+        
+        # Validate CVV (3 digits)
+        cvv = self.cvv_input.text().strip()
+        if not cvv or '_' in cvv:  # Check for incomplete input mask
+            QMessageBox.warning(self, "Input Error", "CVV must be complete (3 digits).")
+            return
+        
+        if len(cvv) != 3:
+            QMessageBox.warning(self, "Input Error", "CVV must be exactly 3 digits.")
+            return
+        
+        # If all validations pass, accept the dialog
+        self.accept()
+    
+    def get_data(self) -> dict:
+        """Returns the entered data."""
+        # Remove spaces from card number before storing
+        card_number = self.card_number_input.text().replace(' ', '')
+        
+        return {
+            "id": self.card_data.get('id'),  # Include ID if editing
+            "card_name": self.card_name_input.text().strip(),
+            "card_number": card_number,  # Store without spaces
+            "cardholder_name": self.cardholder_name_input.text().strip(),
+            "expiry_date": self.expiry_date_input.text().strip(),
+            "cvv": self.cvv_input.text().strip(),
+            "card_type": self.card_type_input.currentText(),
+            "notes": self.notes_input.toPlainText().strip()
+        }
