@@ -3,6 +3,7 @@
 import time
 import random
 import pyautogui
+import threading
 from PyQt6.QtCore import QThread, pyqtSignal
 
 # Disable pyautogui fail-safes if absolutely necessary (use with caution)
@@ -25,14 +26,22 @@ class ClickerThread(QThread):
         self.coordinates = coordinates
         self.settings = settings # Expects a dict: {'min_delay', 'max_delay', 'speed_factor'}
         self._is_running = False
+        self.is_paused = False
+        self._pause_cond = threading.Condition()
 
     def run(self):
         """Main execution method for the thread."""
         self.status_update.emit("Clicking thread started.")
         self._is_running = True
+        self.is_paused = False
         click_count = 0
 
         while self._is_running:
+            with self._pause_cond:
+                while self.is_paused:
+                    self.status_update.emit("Clicking paused.")
+                    self._pause_cond.wait()
+
             try:
                 if not self.coordinates:
                     self.status_update.emit("Error: No coordinates left.")
@@ -57,8 +66,8 @@ class ClickerThread(QThread):
                 if not self._is_running: break # Check again after click
 
                 # 4. Wait random delay
-                min_d = self.settings.get('min_delay', 500) / 1000.0
-                max_d = self.settings.get('max_delay', 2000) / 1000.0
+                min_d = self.settings.get('min_delay', 2000) / 1000.0
+                max_d = self.settings.get('max_delay', 7000) / 1000.0
                 delay = random.uniform(min_d, max_d)
                 self.status_update.emit(f"Waiting for {delay:.2f} seconds... (Click {click_count})")
                 # Use a loop for sleeping to check stop flag frequently
@@ -135,3 +144,14 @@ class ClickerThread(QThread):
         """Signals the thread to stop running."""
         self.status_update.emit("Stop signal received.")
         self._is_running = False
+
+    def pause(self):
+        """Pauses the clicking thread."""
+        with self._pause_cond:
+            self.is_paused = True
+
+    def resume(self):
+        """Resumes the clicking thread from pause."""
+        with self._pause_cond:
+            self.is_paused = False
+            self._pause_cond.notify()

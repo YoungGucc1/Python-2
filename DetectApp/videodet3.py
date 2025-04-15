@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import (
     Qt, QTimer, QThread, pyqtSignal, QObject, QSize
 )
-from PyQt6.QtGui import QImage, QPixmap, QPalette, QColor, QIcon, QFont
+from PyQt6.QtGui import QImage, QPixmap, QPalette, QColor, QIcon, QFont, QPixmapCache
 
 # --- Constants ---
 # Function to find available models in the Models directory
@@ -639,7 +639,8 @@ class ObjectDetectionApp(QMainWindow):
 
 
     def reset_controls_after_load(self):
-        # This runs after the thread finishes (success or error)
+        """Called when the model loader thread finishes (success or error)."""
+        print("Model loader thread finished.")
         self.model_combo.setEnabled(True)
         self.file_button.setEnabled(True)
         # Play/Save buttons are enabled in on_model_ready if successful AND video is loaded
@@ -982,27 +983,35 @@ class ObjectDetectionApp(QMainWindow):
     def toggle_fullscreen(self, checked):
         if checked:
             self.showFullScreen()
-            # Simple hide - could be more sophisticated storing previous state
-            self.centralWidget().layout().itemAt(1).widget().hide() # Hide controls widget
-            self.centralWidget().layout().itemAt(2).widget().hide() # Hide slider layout
-            self.statusBar().hide()
-            self.fullscreen_button.setText("Exit Fullscreen") # Button is still visible
-            # Manually position fullscreen button in fullscreen (basic example)
-            self.fullscreen_button.setParent(self) # Make it top-level temporarily
+            # Hide controls widget if it exists
+            controls = self.centralWidget().layout().itemAt(1)
+            if controls and controls.widget():
+                controls.widget().hide()
+            # Hide slider layout if it exists
+            slider = self.centralWidget().layout().itemAt(2)
+            if slider and slider.widget():
+                slider.widget().hide()
+            # Hide status bar if it exists
+            status_bar = self.statusBar()
+            if status_bar:
+                status_bar.hide()
+            self.fullscreen_button.setText("Exit Fullscreen")
+            self.fullscreen_button.setParent(self)
             self.fullscreen_button.move(self.width() - self.fullscreen_button.width() - 10, 10)
             self.fullscreen_button.show()
-
         else:
-             self.showNormal()
-             self.centralWidget().layout().itemAt(1).widget().show()
-             self.centralWidget().layout().itemAt(2).widget().show()
-             self.statusBar().show()
-             # Add button back to layout (this might be tricky, easier to just keep it in layout)
-             # For simplicity, we didn't remove it from layout, just hid parent widgets
-             self.fullscreen_button.setText("Fullscreen")
-             # Ensure video label resizes correctly after exiting fullscreen
-             QTimer.singleShot(0, lambda: self.resize_video_label()) # Trigger resize shortly after
-
+            self.showNormal()
+            controls = self.centralWidget().layout().itemAt(1)
+            if controls and controls.widget():
+                controls.widget().show()
+            slider = self.centralWidget().layout().itemAt(2)
+            if slider and slider.widget():
+                slider.widget().show()
+            status_bar = self.statusBar()
+            if status_bar:
+                status_bar.show()
+            self.fullscreen_button.setText("Fullscreen")
+            QTimer.singleShot(0, lambda: self.resize_video_label())
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1158,4 +1167,4 @@ if __name__ == '__main__':
     window.show()
     sys.exit(app.exec())
 
-# --- END OF FILE videodet_pyqt6.py ---
+# --- END OF FILE videodet_pyqt6.py ---from PyQt6.QtGui import QPixmapCache

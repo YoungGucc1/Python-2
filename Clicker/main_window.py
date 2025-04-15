@@ -7,8 +7,8 @@ from PyQt6.QtWidgets import (
     QPushButton, QRadioButton, QLabel, QListWidget, QSpinBox,
     QMessageBox, QStatusBar, QCheckBox, QGridLayout
 )
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QAction # For menu bar if needed
+from PyQt6.QtCore import Qt, QTimer, QThread
+from PyQt6.QtGui import QAction, QShortcut, QKeySequence # For menu bar and shortcuts
 
 # Optional: Import styles if using styles.py
 try:
@@ -18,6 +18,13 @@ except ImportError:
 
 # Import the worker thread
 from clicker_thread import ClickerThread
+
+import threading
+try:
+    import keyboard
+    KEYBOARD_AVAILABLE = True
+except ImportError:
+    KEYBOARD_AVAILABLE = False
 
 
 class MainWindow(QMainWindow):
@@ -41,7 +48,14 @@ class MainWindow(QMainWindow):
 
         self._setup_ui()
         self._apply_styles() # Apply the dark theme
-        self._update_ui_for_mode() # Set initial UI state
+        # Only call after all buttons are created
+        self._update_ui_for_mode()
+        # Start global hotkey listener if keyboard is available
+        if KEYBOARD_AVAILABLE:
+            self._global_hotkey_thread = threading.Thread(target=self._start_global_hotkeys, daemon=True)
+            self._global_hotkey_thread.start()
+        else:
+            print("[WARNING] 'keyboard' module not found. Global hotkeys disabled.")
 
 
     def _setup_ui(self):
@@ -85,12 +99,22 @@ class MainWindow(QMainWindow):
         self.btn_toggle_click = QPushButton("Start Clicking")
         self.btn_toggle_click.clicked.connect(self._toggle_clicking)
 
+        self.btn_pause_click = QPushButton("Pause Clicking (F7)")
+        self.btn_pause_click.setEnabled(False)
+        self.btn_pause_click.clicked.connect(self._pause_clicking)
+
+        self.btn_stop_click = QPushButton("Stop Clicking (F8)")
+        self.btn_stop_click.setEnabled(False)
+        self.btn_stop_click.clicked.connect(self._stop_clicking)
+
         self.btn_clear_coords = QPushButton("Clear All Coordinates")
         self.btn_clear_coords.clicked.connect(self._clear_coordinates)
 
         left_layout.addWidget(self.btn_toggle_capture)
         left_layout.addWidget(self.btn_capture_current)
         left_layout.addWidget(self.btn_toggle_click)
+        left_layout.addWidget(self.btn_pause_click)
+        left_layout.addWidget(self.btn_stop_click)
         left_layout.addWidget(self.btn_clear_coords)
 
         # Settings
@@ -155,23 +179,10 @@ class MainWindow(QMainWindow):
         self.setStatusBar(self.statusBar)
         self._update_status("Idle.")
 
-        # --- Global Hotkey Setup (Requires pynput, not included in this version) ---
-        # Placeholder for future pynput integration if needed for F6 hotkey
-        # self.hotkey_listener = None
-        # self._setup_hotkey_listener()
-
-    def _apply_styles(self):
-        """Applies the QSS stylesheet."""
-        if DARK_STYLE:
-            self.setStyleSheet(DARK_STYLE)
-
-    # --- Mode and State Management ---
-
-    def _set_mode(self, mode):
-        """Sets the current operation mode."""
-        if self.clicker_thread and self.clicker_thread.isRunning():
-            self._update_status("Stop clicking before changing mode.")
-            # Revert radio button selection
+        # --- Hotkeys for Pause/Stop in Click Mode ---
+        self.shortcut_pause = QShortcut(QKeySequence("Shift+P"), self)
+        self.shortcut_pause.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.shortcut_pause.activated.connect(lambda: (priP button selection
             if mode == self.MODE_CAPTURE:
                 self.radio_click.setChecked(True)
             else:
@@ -186,29 +197,39 @@ class MainWindow(QMainWindow):
     def _update_ui_for_mode(self):
         """Enables/disables UI elements based on the current mode."""
         is_capture_mode = self.current_mode == self.MODE_CAPTURE
-        is_clicking_active = self.clicker_thread and self.clicker_thread.isRunning()
-
-        # Capture mode controls
-        self.btn_toggle_capture.setEnabled(is_capture_mode and not is_clicking_active)
-        self.btn_capture_current.setEnabled(is_capture_mode and not is_clicking_active)
-        self.lbl_cursor_pos.setVisible(is_capture_mode)
-        if is_capture_mode and self.btn_toggle_capture.isChecked():
-             if not self.cursor_pos_timer.isActive(): self.cursor_pos_timer.start()
+        is_clicking_active = bool(self.clicker_thread and self.clicker_thread.isRunning())
+        # Defensive: Only setEnabled if buttons exist
+        if hasattr(self, 'btn_toggle_capture') and self.btn_toggle_capture is not None:
+            self.btn_toggle_capture.setEnabled(is_capture_mode and not is_clicking_active)
+        if hasattr(self, 'btn_capture_current') and self.btn_capture_current is not None:
+            self.btn_capture_current.setEnabled(is_capture_mode and not is_clicking_active)
+        if hasattr(self, 'lbl_cursor_pos') and self.lbl_cursor_pos is not None:
+            self.lbl_cursor_pos.setVisible(is_capture_mode)
+        if is_capture_mode and hasattr(self, 'btn_toggle_capture') and self.btn_toggle_capture.isChecked():
+            if not self.cursor_pos_timer.isActive(): self.cursor_pos_timer.start()
         else:
-             if self.cursor_pos_timer.isActive(): self.cursor_pos_timer.stop()
-
-
-        # Click mode controls
-        self.btn_toggle_click.setEnabled(not is_capture_mode and bool(self.coordinates))
-        self.radio_capture.setEnabled(not is_clicking_active)
-        self.radio_click.setEnabled(not is_clicking_active)
-        self.btn_clear_coords.setEnabled(not is_clicking_active)
-        self.list_coords.setEnabled(not is_clicking_active) # Prevent modification during click
-
+            if self.cursor_pos_timer.isActive(): self.cursor_pos_timer.stop()
+        if hasattr(self, 'btn_toggle_click') and self.btn_toggle_click is not None:
+            self.btn_toggle_click.setEnabled(not is_capture_mode and bool(self.coordinates))
+        if hasattr(self, 'btn_pause_click') and self.btn_pause_click is not None:
+            self.btn_pause_click.setEnabled(not is_capture_mode and is_clicking_active)
+        if hasattr(self, 'btn_stop_click') and self.btn_stop_click is not None:
+            self.btn_stop_click.setEnabled(not is_capture_mode and is_clicking_active)
+        if hasattr(self, 'radio_capture') and self.radio_capture is not None:
+            self.radio_capture.setEnabled(not is_clicking_active)
+        if hasattr(self, 'radio_click') and self.radio_click is not None:
+            self.radio_click.setEnabled(not is_clicking_active)
+        if hasattr(self, 'btn_clear_coords') and self.btn_clear_coords is not None:
+            self.btn_clear_coords.setEnabled(not is_clicking_active)
+        if hasattr(self, 'list_coords') and self.list_coords is not None:
+            self.list_coords.setEnabled(not is_clicking_active) # Prevent modification during click
         # Settings - disable during click
-        self.spin_min_delay.setEnabled(not is_clicking_active)
-        self.spin_max_delay.setEnabled(not is_clicking_active)
-        self.spin_speed_factor.setEnabled(not is_clicking_active)
+        if hasattr(self, 'spin_min_delay') and self.spin_min_delay is not None:
+            self.spin_min_delay.setEnabled(not is_clicking_active)
+        if hasattr(self, 'spin_max_delay') and self.spin_max_delay is not None:
+            self.spin_max_delay.setEnabled(not is_clicking_active)
+        if hasattr(self, 'spin_speed_factor') and self.spin_speed_factor is not None:
+            self.spin_speed_factor.setEnabled(not is_clicking_active)
 
 
     def _update_status(self, message):
@@ -303,6 +324,8 @@ class MainWindow(QMainWindow):
             self.clicker_thread.stop()
             self.btn_toggle_click.setText("Stopping...")
             self.btn_toggle_click.setEnabled(False) # Disable until thread confirms finish
+            self.btn_pause_click.setEnabled(False)
+            self.btn_stop_click.setEnabled(False)
         else:
             # Start Clicking
             if not self.coordinates:
@@ -333,6 +356,8 @@ class MainWindow(QMainWindow):
                 self.clicker_thread.start()
 
                 self.btn_toggle_click.setText("Stop Clicking")
+                self.btn_pause_click.setEnabled(True)
+                self.btn_stop_click.setEnabled(True)
                 self._update_ui_for_mode() # Disable controls
             except ValueError as ve: # Catch error if coordinates list is empty (shouldn't happen here due to check)
                  QMessageBox.critical(self, "Error Starting Clicker", str(ve))
@@ -342,11 +367,43 @@ class MainWindow(QMainWindow):
                 self.clicker_thread = None
 
 
+    def _pause_clicking(self):
+        """Pauses or resumes the clicking thread."""
+        if self.clicker_thread and self.clicker_thread.isRunning():
+            if hasattr(self.clicker_thread, 'is_paused'):
+                if self.clicker_thread.is_paused:
+                    self.clicker_thread.resume()
+                    self.btn_pause_click.setText("Pause Clicking (F7)")
+                    self._update_status("Clicking resumed.")
+                else:
+                    self.clicker_thread.pause()
+                    self.btn_pause_click.setText("Resume Clicking (F7)")
+                    self._update_status("Clicking paused.")
+
+
+    def _stop_clicking(self):
+        """Stops the clicking thread."""
+        if self.clicker_thread and self.clicker_thread.isRunning():
+            self.clicker_thread.stop()
+            self.btn_stop_click.setEnabled(False)
+            self.btn_pause_click.setEnabled(False)
+            self.btn_toggle_click.setEnabled(False)
+            self._update_status("Stopping clicking...")
+
+
+    def keyPressEvent(self, event):
+        # No longer needed for F7/F8, handled by QShortcut
+        super().keyPressEvent(event)
+
+
     def _handle_click_finished(self):
         """Called when the clicker thread signals it has finished."""
         self._update_status("Clicking stopped.")
         self.clicker_thread = None # Release the thread object
         self.btn_toggle_click.setText("Start Clicking")
+        self.btn_pause_click.setEnabled(False)
+        self.btn_pause_click.setText("Pause Clicking (F7)")
+        self.btn_stop_click.setEnabled(False)
         self._update_ui_for_mode() # Re-enable controls
 
 
@@ -362,7 +419,12 @@ class MainWindow(QMainWindow):
 
 
     def closeEvent(self, event):
-        """Ensures the clicker thread is stopped when the window closes."""
+        # Optionally, clean up keyboard hooks (not strictly needed since daemon thread)
+        if KEYBOARD_AVAILABLE:
+            try:
+                keyboard.unhook_all_hotkeys()
+            except Exception:
+                pass
         if self.clicker_thread and self.clicker_thread.isRunning():
             self._update_status("Stopping clicker thread before exit...")
             self.clicker_thread.stop()
@@ -398,3 +460,12 @@ class MainWindow(QMainWindow):
     #      #    self.hotkey_listener.stop()
     #      #    self.hotkey_listener = None
     #      pass
+
+    def _start_global_hotkeys(self):
+        # Register global hotkeys using the keyboard library
+        # Use QTimer.singleShot to safely call Qt slots from this thread
+        keyboard.add_hotkey('shift+p', lambda: QTimer.singleShot(0, self._pause_clicking))
+        keyboard.add_hotkey('shift+t', lambda: QTimer.singleShot(0, self._stop_clicking))
+        keyboard.add_hotkey('shift+c', lambda: QTimer.singleShot(0, self._capture_coordinate))
+        print("[INFO] Global hotkeys registered: Shift+P (Pause), Shift+T (Stop), Shift+C (Capture)")
+        keyboard.wait()  # Keeps the thread alive
