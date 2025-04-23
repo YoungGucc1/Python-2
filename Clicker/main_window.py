@@ -2,6 +2,8 @@
 
 import sys
 import pyautogui
+import os
+import json
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QRadioButton, QLabel, QListWidget, QSpinBox,
@@ -33,9 +35,15 @@ class MainWindow(QMainWindow):
     MODE_CAPTURE = 0
     MODE_CLICK = 1
 
+    def _apply_styles(self):
+        """Apply dark style if available."""
+        if DARK_STYLE is not None:
+            self.setStyleSheet(DARK_STYLE)
+
     def __init__(self, parent=None):
         super().__init__(parent)
 
+        self.state_file = os.path.join(os.path.dirname(__file__), 'app_state.json')
         self.coordinates = []
         self.current_mode = self.MODE_CAPTURE
         self.is_capturing = False
@@ -48,6 +56,7 @@ class MainWindow(QMainWindow):
 
         self._setup_ui()
         self._apply_styles() # Apply the dark theme
+        self.load_app_state()
         # Only call after all buttons are created
         self._update_ui_for_mode()
         # Start global hotkey listener if keyboard is available
@@ -56,6 +65,53 @@ class MainWindow(QMainWindow):
             self._global_hotkey_thread.start()
         else:
             print("[WARNING] 'keyboard' module not found. Global hotkeys disabled.")
+
+    def save_app_state(self):
+        """Save coordinates, mode, delays, speed, always-on-top to JSON."""
+        state = {
+            'coordinates': self.coordinates,
+            'mode': self.current_mode,
+            'min_delay': self.spin_min_delay.value() if hasattr(self, 'spin_min_delay') else 500,
+            'max_delay': self.spin_max_delay.value() if hasattr(self, 'spin_max_delay') else 2000,
+            'speed_factor': self.spin_speed_factor.value() if hasattr(self, 'spin_speed_factor') else 1,
+            'always_on_top': self.check_always_on_top.isChecked() if hasattr(self, 'check_always_on_top') else False
+        }
+        try:
+            with open(self.state_file, 'w', encoding='utf-8') as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            print(f"[ERROR] Failed to save app state: {e}")
+
+    def load_app_state(self):
+        """Load state from JSON and apply to UI."""
+        if not os.path.exists(self.state_file):
+            return
+        try:
+            with open(self.state_file, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+            # Coordinates
+            self.coordinates = state.get('coordinates', [])
+            self.list_coords.clear()
+            for coord in self.coordinates:
+                if isinstance(coord, (list, tuple)) and len(coord) == 2:
+                    self.list_coords.addItem(f"X: {coord[0]}, Y: {coord[1]}")
+            # Mode
+            mode = state.get('mode', self.MODE_CAPTURE)
+            if mode == self.MODE_CLICK:
+                self.radio_click.setChecked(True)
+                self.current_mode = self.MODE_CLICK
+            else:
+                self.radio_capture.setChecked(True)
+                self.current_mode = self.MODE_CAPTURE
+            # Delays
+            self.spin_min_delay.setValue(state.get('min_delay', 500))
+            self.spin_max_delay.setValue(state.get('max_delay', 2000))
+            self.spin_speed_factor.setValue(state.get('speed_factor', 1))
+            # Always on top
+            self.check_always_on_top.setChecked(state.get('always_on_top', False))
+        except Exception as e:
+            print(f"[ERROR] Failed to load app state: {e}")
+
 
 
     def _setup_ui(self):
@@ -182,7 +238,26 @@ class MainWindow(QMainWindow):
         # --- Hotkeys for Pause/Stop in Click Mode ---
         self.shortcut_pause = QShortcut(QKeySequence("Shift+P"), self)
         self.shortcut_pause.setContext(Qt.ShortcutContext.ApplicationShortcut)
-        self.shortcut_pause.activated.connect(lambda: (priP button selection
+        self.shortcut_pause.activated.connect(lambda: self.pause_function())
+
+        self.shortcut_stop = QShortcut(QKeySequence("Shift+T"), self)
+        self.shortcut_stop.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.shortcut_stop.activated.connect(self._stop_clicking)
+
+        self.shortcut_capture = QShortcut(QKeySequence("Shift+C"), self)
+        self.shortcut_capture.setContext(Qt.ShortcutContext.ApplicationShortcut)
+        self.shortcut_capture.activated.connect(self._capture_coordinate)
+
+
+    def _set_mode(self, mode):
+        """Sets the current mode and updates the UI."""
+        if self.current_mode == mode: return
+
+        # Prevent mode change during clicking
+        if self.clicker_thread and self.clicker_thread.isRunning():
+            QMessageBox.warning(self, "Mode Change Disabled",
+                                "Cannot change mode while clicking is active.")
+            # Revert radio button selection
             if mode == self.MODE_CAPTURE:
                 self.radio_click.setChecked(True)
             else:
@@ -418,7 +493,62 @@ class MainWindow(QMainWindow):
         self.show() # Re-show to apply the flag change
 
 
+    def save_app_state(self):
+        # Only save JSON-serializable data
+        app_state = {
+            'coordinates': self.coordinates,
+            'min_delay': self.spin_min_delay.value() if hasattr(self, 'spin_min_delay') else 500,
+            'max_delay': self.spin_max_delay.value() if hasattr(self, 'spin_max_delay') else 2000,
+            'speed_factor': self.spin_speed_factor.value() if hasattr(self, 'spin_speed_factor') else 1,
+            'current_mode': self.current_mode,
+            'is_capturing': self.is_capturing,
+            'always_on_top': self.check_always_on_top.isChecked() if hasattr(self, 'check_always_on_top') else False
+        }
+        try:
+            with open(self.state_file, 'w', encoding='utf-8') as f:
+                json.dump(app_state, f, indent=2)
+        except Exception as e:
+            print(f"[ERROR] Failed to save app state: {e}")
+
+    def load_app_state(self):
+        # Load state from JSON and apply to UI, handle decode errors gracefully
+        if not os.path.exists(self.state_file):
+            return
+        try:
+            with open(self.state_file, 'r', encoding='utf-8') as f:
+                state = json.load(f)
+            # Coordinates
+            self.coordinates = state.get('coordinates', [])
+            self.list_coords.clear()
+            for coord in self.coordinates:
+                if isinstance(coord, (list, tuple)) and len(coord) == 2:
+                    self.list_coords.addItem(f"X: {coord[0]}, Y: {coord[1]}")
+            # Mode
+            mode = state.get('current_mode', self.MODE_CAPTURE)
+            if mode == self.MODE_CLICK:
+                self.radio_click.setChecked(True)
+                self.current_mode = self.MODE_CLICK
+            else:
+                self.radio_capture.setChecked(True)
+                self.current_mode = self.MODE_CAPTURE
+            # Delays
+            self.spin_min_delay.setValue(state.get('min_delay', 500))
+            self.spin_max_delay.setValue(state.get('max_delay', 2000))
+            self.spin_speed_factor.setValue(state.get('speed_factor', 1))
+            # Always on top
+            self.check_always_on_top.setChecked(state.get('always_on_top', False))
+            # Capture hotkey state
+            self.is_capturing = state.get('is_capturing', False)
+            if self.is_capturing:
+                self.btn_toggle_capture.setText("Stop Capture Hotkey (F6)")
+            else:
+                self.btn_toggle_capture.setText("Start Capture Hotkey (F6)")
+        except (json.JSONDecodeError, Exception) as e:
+            print(f"[ERROR] Failed to load app state: {e}. The state file may be corrupted. It will be ignored.")
+
+
     def closeEvent(self, event):
+        self.save_app_state()
         # Optionally, clean up keyboard hooks (not strictly needed since daemon thread)
         if KEYBOARD_AVAILABLE:
             try:
