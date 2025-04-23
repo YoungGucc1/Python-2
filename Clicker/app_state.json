@@ -49,9 +49,9 @@
       829
     ]
   ],
-  "min_delay": 3500,
+  "min_delay": 4500,
   "max_delay": 9000,
-  "speed_factor": 2,
+  "speed_factor": 1,
   "current_mode": 1,
   "is_capturing": true,
   "always_on_top": true
