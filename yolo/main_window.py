@@ -6,10 +6,11 @@ import os
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QPushButton,
     QListWidget, QListWidgetItem, QLabel, QProgressBar, QSpinBox, QDoubleSpinBox,
-    QLineEdit, QStatusBar, QFileDialog, QMessageBox, QStyleOption, QStyle
+    QLineEdit, QStatusBar, QFileDialog, QMessageBox, QStyleOption, QStyle,
+    QMenuBar, QMenu
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QSize
-from PyQt6.QtGui import QIcon, QPainter, QColor, QPalette
+from PyQt6.QtCore import Qt, pyqtSignal, QSize, QSettings, QCoreApplication, QDir, QPoint, QByteArray, pyqtSlot
+from PyQt6.QtGui import QIcon, QPainter, QColor, QPalette, QAction, QCloseEvent
 
 # Use local imports due to flat structure
 from image_canvas import ImageCanvas
@@ -23,31 +24,99 @@ class MainWindow(QMainWindow):
     selectModelClicked = pyqtSignal(str)        # Emits model file path
     processImageClicked = pyqtSignal()          # Emits when process button clicked
     saveDatasetClicked = pyqtSignal(str)        # Emits output directory
-    augmentDatasetClicked = pyqtSignal(int)     # Emits number of augmentations
     addClassClicked = pyqtSignal(str)           # Emits class name to add
     removeClassClicked = pyqtSignal(str)        # Emits class name to remove
     imageSelected = pyqtSignal(str)             # Emits image path when selected in list
     classSelected = pyqtSignal(str)             # Emits class name when selected in list
     configChanged = pyqtSignal(dict)            # Emits dict of config values (conf, iou, split)
     drawBoxClicked = pyqtSignal(bool)           # Emits True when Draw Box is toggled on, False off
-    deleteSelectedBoxClicked = pyqtSignal()     # Emits when Delete Selected Box is clicked
+    deleteSelectedBoxClicked = pyqtSignal()
+
+    # --- Signals for Project Operations (Emitted TO AppLogic) ---
+    newProjectRequested = pyqtSignal()
+    openProjectRequested = pyqtSignal(str) # file_path
+    saveProjectRequested = pyqtSignal()
+    saveProjectAsRequested = pyqtSignal(str) # file_path
+    requestClose = pyqtSignal() # Signal to AppLogic to check save before closing
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("YOLO Dataset Creator (PyQt6)")
-        self.resize(1300, 850) # Slightly larger default size
+        self._app_logic = None # Placeholder for AppLogic reference needed by closeEvent
+        self.base_window_title = "YOLO Dataset Creator (PyQt6)"
+        self.setWindowTitle(self.base_window_title)
+        # self.resize(1300, 850) # Size will be handled by QSettings
 
-        self._create_actions() # Optional: For menus/toolbars
+        self._create_actions() # Now creates menu actions
+        self._create_menu()
         self._create_widgets()
         self._create_layout()
         self._create_connections()
-        self._update_buttons_state() # Initial state
+        self._update_buttons_state({}) # Initial empty state
 
         self.status_bar.showMessage("Ready")
 
+        self._read_settings() # Load window state and other UI settings
+
+    def set_app_logic(self, app_logic):
+        """Set a reference to AppLogic, needed for closeEvent."""
+        self._app_logic = app_logic
+
     def _create_actions(self):
-        # Placeholder for potential menu actions (File, Edit, View, etc.)
-        pass
+        """Create QAction objects for menus and potentially toolbars."""
+        # --- File Actions ---
+        self.new_action = QAction(QIcon.fromTheme("document-new"), "&New Project", self)
+        self.new_action.setShortcut("Ctrl+N")
+        self.new_action.setStatusTip("Create a new annotation project")
+        self.new_action.triggered.connect(self._on_new_project)
+
+        self.open_action = QAction(QIcon.fromTheme("document-open"), "&Open Project...", self)
+        self.open_action.setShortcut("Ctrl+O")
+        self.open_action.setStatusTip("Open an existing annotation project (.ydc_proj file)")
+        self.open_action.triggered.connect(self._prompt_open_project)
+
+        self.save_action = QAction(QIcon.fromTheme("document-save"), "&Save Project", self)
+        self.save_action.setShortcut("Ctrl+S")
+        self.save_action.setStatusTip("Save the current project")
+        self.save_action.triggered.connect(self.saveProjectRequested)
+
+        self.save_as_action = QAction(QIcon.fromTheme("document-save-as"), "Save Project &As...", self)
+        self.save_as_action.setShortcut("Ctrl+Shift+S")
+        self.save_as_action.setStatusTip("Save the current project to a new file")
+        self.save_as_action.triggered.connect(self._prompt_save_project_as)
+
+        self.exit_action = QAction(QIcon.fromTheme("application-exit"), "E&xit", self)
+        self.exit_action.setShortcut("Ctrl+Q")
+        self.exit_action.setStatusTip("Exit the application")
+        self.exit_action.triggered.connect(self.close) # Triggers closeEvent
+
+        # --- Edit Actions (Placeholder) ---
+        # self.undo_action = ...
+        # self.redo_action = ...
+
+        # --- View Actions (Placeholder) ---
+        # self.zoom_in_action = ...
+        # self.zoom_out_action = ...
+
+    def _create_menu(self):
+        """Create the main menu bar."""
+        menu_bar = self.menuBar()
+
+        # File Menu
+        file_menu = menu_bar.addMenu("&File")
+        file_menu.addAction(self.new_action)
+        file_menu.addAction(self.open_action)
+        file_menu.addAction(self.save_action)
+        file_menu.addAction(self.save_as_action)
+        file_menu.addSeparator()
+        file_menu.addAction(self.exit_action)
+
+        # Edit Menu (Placeholder)
+        # edit_menu = menu_bar.addMenu("&Edit")
+        # ... add actions ...
+
+        # View Menu (Placeholder)
+        # view_menu = menu_bar.addMenu("&View")
+        # ... add actions ...
 
     def _create_widgets(self):
         """Create all the widgets for the main window."""
@@ -74,11 +143,11 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(False) # Status bar shows messages
 
-        self.augment_btn = QPushButton(self.style().standardIcon(QStyle.StandardPixmap.SP_FileDialogDetailedView), " Augment")
         self.augmentations_spin = QSpinBox()
-        self.augmentations_spin.setRange(1, 50) # Increased range
-        self.augmentations_spin.setValue(5)
-        self.augmentations_spin.setPrefix("Count: ")
+        self.augmentations_spin.setRange(0, 50) # Allow 0 augmentations
+        self.augmentations_spin.setValue(0) # Default to 0
+        self.augmentations_spin.setPrefix("Aug Count: ") # Changed prefix
+        self.augmentations_spin.setToolTip("Number of augmented variations per image to generate during Save Dataset")
 
         self.save_btn = QPushButton(self.style().standardIcon(QStyle.StandardPixmap.SP_DialogSaveButton), " Save Dataset...")
         self.train_split_spinbox = QDoubleSpinBox()
@@ -132,10 +201,8 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(self.iou_spinbox)
         controls_layout.addWidget(self.progress_bar, 1) # Stretch progress bar
         controls_layout.addSpacing(20)
-        controls_layout.addWidget(self.augment_btn)
-        controls_layout.addWidget(self.augmentations_spin)
-        controls_layout.addSpacing(20)
         controls_layout.addWidget(self.save_btn)
+        controls_layout.addWidget(self.augmentations_spin)
         controls_layout.addWidget(self.train_split_spinbox)
         main_layout.addWidget(controls_panel)
 
@@ -198,12 +265,12 @@ class MainWindow(QMainWindow):
         # Top Controls
         self.add_images_btn.clicked.connect(self._on_add_images_clicked)
         self.select_model_btn.clicked.connect(self._on_select_model_clicked)
-        self.process_btn.clicked.connect(self.processImageClicked) # Forward signal
+        self.process_btn.clicked.connect(self.processImageClicked)
         self.save_btn.clicked.connect(self._on_save_dataset_clicked)
-        self.augment_btn.clicked.connect(self._on_augment_dataset_clicked)
         self.conf_spinbox.valueChanged.connect(self._on_config_changed)
         self.iou_spinbox.valueChanged.connect(self._on_config_changed)
         self.train_split_spinbox.valueChanged.connect(self._on_config_changed)
+        self.augmentations_spin.valueChanged.connect(self._on_config_changed)
 
         # Image List
         self.images_list.currentItemChanged.connect(self._on_image_selected)
@@ -213,7 +280,7 @@ class MainWindow(QMainWindow):
         self.zoom_out_btn.clicked.connect(self.image_canvas.zoom_out)
         self.fit_btn.clicked.connect(self.image_canvas.fit_to_view)
         self.draw_box_btn.toggled.connect(self._on_draw_box_toggled)
-        self.delete_box_btn.clicked.connect(self.deleteSelectedBoxClicked) # Forward signal
+        self.delete_box_btn.clicked.connect(self.deleteSelectedBoxClicked)
 
         # Class List / Management
         self.classes_list.currentItemChanged.connect(self._on_class_selected)
@@ -224,291 +291,336 @@ class MainWindow(QMainWindow):
         # Canvas -> Main Window (indirectly to AppLogic)
         self.image_canvas.boxSelected.connect(self._on_box_selected_in_canvas)
 
-    # --- Event Handlers / Slots ---
+        # --- No need to connect menu actions here, they are connected in _create_actions ---
+
+    # --- Event Handlers / Slots for UI Actions ---
+
+    def _get_last_dir(self, key: str) -> str:
+        """Helper to get the last used directory from QSettings."""
+        settings = QSettings()
+        last_dir = settings.value(f"ui/last{key}Dir", QDir.homePath(), type=str)
+        return last_dir
+
+    def _set_last_dir(self, key: str, dir_path: str):
+        """Helper to save the last used directory to QSettings."""
+        settings = QSettings()
+        settings.setValue(f"ui/last{key}Dir", dir_path)
 
     def _on_add_images_clicked(self):
+        last_dir = self._get_last_dir("Image")
         file_paths, _ = QFileDialog.getOpenFileNames(
-            self, "Select Images", "", "Image Files (*.jpg *.jpeg *.png *.bmp *.tif *.tiff)"
+            self, "Select Images", last_dir, "Image Files (*.jpg *.jpeg *.png *.bmp *.tif *.tiff)"
         )
         if file_paths:
+            self._set_last_dir("Image", os.path.dirname(file_paths[0]))
             self.addImagesClicked.emit(file_paths)
 
     def _on_select_model_clicked(self):
+        last_dir = self._get_last_dir("Model")
         file_path, _ = QFileDialog.getOpenFileName(
-            self, "Select YOLO Model", "", "YOLO Models (*.pt *.onnx)"
+            self, "Select YOLO Model", last_dir, "YOLO Models (*.pt *.onnx)"
         )
         if file_path:
+            self._set_last_dir("Model", os.path.dirname(file_path))
             self.selectModelClicked.emit(file_path)
 
     def _on_save_dataset_clicked(self):
+        last_dir = self._get_last_dir("Dataset")
         output_dir = QFileDialog.getExistingDirectory(
-            self, "Select Output Directory for Dataset", ""
+            self, "Select Output Directory for Dataset", last_dir
         )
         if output_dir:
+            self._set_last_dir("Dataset", output_dir)
             self.saveDatasetClicked.emit(output_dir)
 
-    def _on_augment_dataset_clicked(self):
-        num_augmentations = self.augmentations_spin.value()
-        self.augmentDatasetClicked.emit(num_augmentations)
+    # --- Slots for Menu Actions ---
+    def _on_new_project(self):
+        # Forward to AppLogic (assuming AppLogic has a new_project method)
+        if self._app_logic:
+            self._app_logic.new_project()
+
+    def _prompt_open_project(self):
+        last_dir = self._get_last_dir("Project")
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Open Project", last_dir, "YOLO Dataset Creator Project (*.ydc_proj);;All Files (*)"
+        )
+        if file_path:
+            self._set_last_dir("Project", os.path.dirname(file_path))
+            self.openProjectRequested.emit(file_path)
+
+    def _prompt_save_project_as(self):
+        last_dir = self._get_last_dir("Project")
+        # Suggest a filename based on current project or default
+        suggested_name = "untitled.ydc_proj"
+        if self._app_logic and self._app_logic.current_project_path:
+            suggested_name = os.path.basename(self._app_logic.current_project_path)
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Project As", os.path.join(last_dir, suggested_name),
+            "YOLO Dataset Creator Project (*.ydc_proj);;All Files (*)"
+        )
+        if file_path:
+             # Ensure it has the correct extension
+            if not file_path.lower().endswith(".ydc_proj"):
+                 file_path += ".ydc_proj"
+            self._set_last_dir("Project", os.path.dirname(file_path))
+            self.saveProjectAsRequested.emit(file_path)
+            return True # Indicate save was attempted (used by AppLogic.save_project)
+        return False # Indicate save was cancelled
+
+    # --- Event Handlers / Slots for UI Interactions (keep existing) ---
 
     def _on_add_class_clicked(self):
         class_name = self.new_class_edit.text().strip()
-        if not class_name:
-            QMessageBox.warning(self, "Add Class", "Class name cannot be empty.")
-            return
-        # Check for duplicates
-        items = self.classes_list.findItems(class_name, Qt.MatchFlag.MatchExactly)
-        if items:
-            QMessageBox.warning(self, "Add Class", f"Class '{class_name}' already exists.")
-            return
-
-        self.addClassClicked.emit(class_name)
-        self.new_class_edit.clear()
+        if class_name:
+            self.addClassClicked.emit(class_name)
+            self.new_class_edit.clear()
+        else:
+            self.status_bar.showMessage("Class name cannot be empty.", 3000)
 
     def _on_remove_class_clicked(self):
-        selected_item = self.classes_list.currentItem()
-        if selected_item:
-            class_name = selected_item.text()
+        selected_items = self.classes_list.selectedItems()
+        if selected_items:
+            class_name = selected_items[0].text()
             reply = QMessageBox.question(self, "Remove Class",
-                                       f"Are you sure you want to remove class '{class_name}'?\n"
-                                       "This will unassign it from all bounding boxes.",
-                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                       QMessageBox.StandardButton.No)
+                                         f"Are you sure you want to remove class '{class_name}'?\nThis will unassign it from all annotations.",
+                                         QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                                         QMessageBox.StandardButton.No)
             if reply == QMessageBox.StandardButton.Yes:
-                self.removeClassClicked.emit(class_name)
+                 self.removeClassClicked.emit(class_name)
         else:
-             QMessageBox.warning(self, "Remove Class", "Please select a class to remove.")
-
+             self.status_bar.showMessage("Select a class to remove.", 3000)
 
     def _on_image_selected(self, current: QListWidgetItem | None, previous: QListWidgetItem | None):
         if current:
-            image_path = current.data(Qt.ItemDataRole.UserRole)
-            if image_path:
-                 self.imageSelected.emit(image_path)
-                 self.draw_box_btn.setChecked(False) # Disable drawing when switching images
+            image_path = current.data(Qt.ItemDataRole.UserRole) # Get path from item data
+            self.imageSelected.emit(image_path)
         else:
-             # Handle case where list becomes empty or selection cleared
-             self.imageSelected.emit("") # Send empty path perhaps? Or handle in AppLogic
-             self.draw_box_btn.setChecked(False)
-        self._update_buttons_state()
-
+            self.imageSelected.emit("") # Emit empty string if selection cleared
 
     def _on_class_selected(self, current: QListWidgetItem | None, previous: QListWidgetItem | None):
-        selected_class_name = current.text() if current else None
-        self.classSelected.emit(selected_class_name or "") # Emit name or empty string
-
-        # Highlight selected item visually (optional, but good UX)
-        for i in range(self.classes_list.count()):
-            item = self.classes_list.item(i)
-            is_selected = item is current
-            font = item.font()
-            font.setBold(is_selected)
-            item.setFont(font)
-            # Change background color slightly (requires careful handling with themes)
-            # item.setBackground(QColor(200, 220, 255) if is_selected else self.classes_list.palette().base())
-
-        self._update_buttons_state()
-
+        if current:
+            class_name = current.text()
+            self.classSelected.emit(class_name)
+        else:
+            self.classSelected.emit("")
 
     def _on_box_selected_in_canvas(self, box_index: int):
-        """Called when ImageCanvas signals a box selection change."""
-        # No direct action needed here usually, AppLogic handles the assignment logic
-        # based on this event AND the currently selected class.
-        # We just need to update button states.
-        self._update_buttons_state()
-
+        # Maybe highlight corresponding class if box has one?
+        # For now, just let AppLogic handle assignment logic.
+        pass # No direct UI action needed here, AppLogic handles it
 
     def _on_config_changed(self):
-        """Emit current configuration values."""
         config = self.get_config()
         self.configChanged.emit(config)
 
     def _on_draw_box_toggled(self, checked: bool):
-        """Handle Draw Box button toggle."""
-        self.image_canvas.set_drawing_enabled(checked)
-        self.drawBoxClicked.emit(checked) # Inform AppLogic
-        # Disable selection list interaction while drawing
-        self.images_list.setEnabled(not checked)
-        self.classes_list.setEnabled(not checked)
-        if checked:
-             self.image_canvas.select_box(-1) # Deselect any box
-        self._update_buttons_state()
+        self.drawBoxClicked.emit(checked)
 
-
-    # --- Public Methods for AppLogic to Call ---
+    # --- UI Update Methods ---
 
     def add_images_to_list(self, image_paths: list[str]):
-        current_paths = {self.images_list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.images_list.count())}
-        added_count = 0
+        """Add image paths to the QListWidget, storing the full path."""
+        current_paths = set()
+        for i in range(self.images_list.count()):
+            item = self.images_list.item(i)
+            current_paths.add(item.data(Qt.ItemDataRole.UserRole))
+
         for path in image_paths:
             if path not in current_paths:
-                item_text = os.path.basename(path)
-                item = QListWidgetItem(item_text)
+                item = QListWidgetItem(os.path.basename(path))
                 item.setData(Qt.ItemDataRole.UserRole, path) # Store full path
+                item.setToolTip(path) # Show full path on hover
                 self.images_list.addItem(item)
-                added_count += 1
-
         self.images_status_label.setText(f"Loaded: {self.images_list.count()} images")
-        if added_count > 0 and self.images_list.currentRow() == -1:
-             self.images_list.setCurrentRow(0) # Select first image if nothing was selected
-        self._update_buttons_state()
 
-
-    def set_model_path(self, model_path: str):
-        model_name = os.path.basename(model_path) if model_path else "None"
-        self.model_label.setText(f"Selected Model: {model_name}")
-        self.model_label.setToolTip(model_path or "No model selected")
-        self._update_buttons_state()
+    def set_model_path(self, model_path: str | None):
+        if model_path and os.path.isfile(model_path):
+            self.model_label.setText(f"Selected Model: {os.path.basename(model_path)}")
+            self.model_label.setToolTip(model_path)
+        else:
+            self.model_label.setText("Selected Model: None")
+            self.model_label.setToolTip("")
 
     def add_class_to_list(self, class_name: str):
         # AppLogic should ensure it's not a duplicate, but double-check here
-        items = self.classes_list.findItems(class_name, Qt.MatchFlag.MatchExactly)
-        if not items:
+        if not self.classes_list.findItems(class_name, Qt.MatchFlag.MatchExactly):
             item = QListWidgetItem(class_name)
             self.classes_list.addItem(item)
-            self.classes_list.setCurrentItem(item) # Select the newly added class
-        self._update_buttons_state()
-
+            # Optional: Assign a color? Requires more logic.
 
     def remove_class_from_list(self, class_name: str):
         items = self.classes_list.findItems(class_name, Qt.MatchFlag.MatchExactly)
         for item in items:
-            self.classes_list.takeItem(self.classes_list.row(item))
-        # Clear selection if the removed item was selected
-        if not self.classes_list.currentItem():
-             self._on_class_selected(None, None) # Trigger selection update
-        self._update_buttons_state()
-
+            row = self.classes_list.row(item)
+            self.classes_list.takeItem(row)
+            del item # Explicitly delete item
 
     def get_selected_image_path(self) -> str | None:
-        selected_item = self.images_list.currentItem()
-        return selected_item.data(Qt.ItemDataRole.UserRole) if selected_item else None
+        selected_items = self.images_list.selectedItems()
+        return selected_items[0].data(Qt.ItemDataRole.UserRole) if selected_items else None
 
     def get_selected_class_name(self) -> str | None:
-        selected_item = self.classes_list.currentItem()
-        return selected_item.text() if selected_item else None
+        selected_items = self.classes_list.selectedItems()
+        return selected_items[0].text() if selected_items else None
 
     def get_class_names(self) -> list[str]:
         return [self.classes_list.item(i).text() for i in range(self.classes_list.count())]
 
     def display_image(self, image_path: str | None):
-        if image_path and os.path.exists(image_path):
+        """Tell the canvas to display the image."""
+        if image_path:
             success = self.image_canvas.set_image(image_path=image_path)
             if not success:
-                QMessageBox.warning(self, "Image Load Error", f"Failed to load image:\n{image_path}")
-                # Optionally remove from list or mark as bad
+                 self.show_message("Image Load Error", f"Failed to load or display image:\n{image_path}", "error")
         else:
-            self.image_canvas.set_image() # Clear canvas if path is invalid/None
-        self._update_buttons_state()
-
+            self.image_canvas.set_image(None) # Clear canvas
 
     def update_annotations(self, annotations: list[dict]):
+        """Update the annotations displayed on the canvas."""
         self.image_canvas.set_annotations(annotations)
-        self._update_buttons_state()
-
 
     def update_class_names_display(self, class_names: list[str]):
-        """Update both the class list widget and the canvas's knowledge."""
-        self.image_canvas.set_class_names(class_names)
+        """Update the class names list and the canvas's internal list."""
+        # --- Update QListWidget ---
+        # Store current selection
+        selected_text = self.get_selected_class_name()
 
-        # --- Sync QListWidget ---
-        current_selection = self.get_selected_class_name()
-        # Remember scroll position
-        scroll_bar = self.classes_list.verticalScrollBar()
-        scroll_pos = scroll_bar.value()
-
-        self.classes_list.currentItemChanged.disconnect(self._on_class_selected) # Avoid signals during update
+        # Clear and repopulate
         self.classes_list.clear()
-        self.classes_list.addItems(class_names)
+        new_selection_row = -1
+        for i, name in enumerate(class_names):
+            item = QListWidgetItem(name)
+            self.classes_list.addItem(item)
+            if name == selected_text:
+                 new_selection_row = i
 
         # Restore selection if possible
-        new_selection_item = None
-        if current_selection in class_names:
-            items = self.classes_list.findItems(current_selection, Qt.MatchFlag.MatchExactly)
-            if items:
-                 new_selection_item = items[0]
-                 self.classes_list.setCurrentItem(new_selection_item)
+        if new_selection_row != -1:
+             self.classes_list.setCurrentRow(new_selection_row)
+        else:
+             self.classes_list.clearSelection()
 
-        # Restore scroll position
-        scroll_bar.setValue(scroll_pos)
-        self.classes_list.currentItemChanged.connect(self._on_class_selected)
-
-        # Manually trigger selection update if selection changed (or cleared)
-        self._on_class_selected(new_selection_item, None) # Call manually to update highlight/state
-
-        self._update_buttons_state()
-
+        # --- Update ImageCanvas ---
+        self.image_canvas.set_class_names(class_names)
 
     def set_progress(self, value: int, max_value: int = 100):
         self.progress_bar.setRange(0, max_value)
         self.progress_bar.setValue(value)
-        self.progress_bar.setVisible(value > 0 and value < max_value)
+        self.progress_bar.setTextVisible(value > 0 and value < max_value)
 
     def set_status(self, message: str, timeout: int = 0):
         self.status_bar.showMessage(message, timeout)
 
     def show_message(self, title: str, message: str, level: str = "info"):
+        msg_box = QMessageBox(self)
+        msg_box.setWindowTitle(title)
+        msg_box.setText(message)
         icon = QMessageBox.Icon.Information
         if level == "warning":
             icon = QMessageBox.Icon.Warning
         elif level == "error":
             icon = QMessageBox.Icon.Critical
-        QMessageBox(icon, title, message, QMessageBox.StandardButton.Ok, self).exec()
+        msg_box.setIcon(icon)
+        msg_box.exec()
 
     def get_config(self) -> dict:
-        """Return current configuration settings."""
         return {
             'conf_threshold': self.conf_spinbox.value(),
             'iou_threshold': self.iou_spinbox.value(),
             'train_split': self.train_split_spinbox.value(),
+            'augment_count': self.augmentations_spin.value(),
         }
 
-    def enable_processing_controls(self, enable: bool):
-        """Enable/disable controls during long operations."""
-        self.add_images_btn.setEnabled(enable)
-        self.select_model_btn.setEnabled(enable)
-        self.process_btn.setEnabled(enable)
-        self.augment_btn.setEnabled(enable)
-        self.save_btn.setEnabled(enable)
-        self.images_list.setEnabled(enable)
-        self.classes_list.setEnabled(enable)
-        # Keep canvas controls always enabled? Or disable some?
-        self.draw_box_btn.setEnabled(enable)
-        self.delete_box_btn.setEnabled(enable and self.image_canvas.selected_box_idx != -1)
+    @pyqtSlot(dict)
+    def _update_buttons_state(self, state: dict):
+        """Update enabled state of buttons based on the state dict from AppLogic."""
+        # --- Update buttons based on explicit state keys ---
+        self.add_images_btn.setEnabled(state.get('enable_add_images', True))
+        self.select_model_btn.setEnabled(state.get('enable_select_model', True))
+        self.process_btn.setEnabled(state.get('enable_process', False))
+        self.save_btn.setEnabled(state.get('enable_save_dataset', False))
+        self.add_class_btn.setEnabled(state.get('enable_add_class', True))
+        self.remove_class_btn.setEnabled(state.get('enable_remove_class', False))
+        self.delete_box_btn.setEnabled(state.get('enable_delete_box', False))
+        self.draw_box_btn.setEnabled(state.get('enable_draw_box', False))
 
-    # --- Internal State Update ---
+        # --- Update Menu actions ---
+        self.save_action.setEnabled(state.get('enable_save_project', False))
+        self.save_as_action.setEnabled(state.get('enable_save_project_as', False))
+        # New/Open/Exit are generally always enabled, unless maybe during modal processing?
+        is_processing = not state.get('enable_add_images', True) # Infer processing from a base action
+        self.new_action.setEnabled(not is_processing)
+        self.open_action.setEnabled(not is_processing)
+        # self.exit_action always enabled
 
-    def _update_buttons_state(self):
-        """Update the enabled state of buttons based on current application state."""
-        has_images = self.images_list.count() > 0
-        has_model = not self.model_label.text().endswith("None")
-        has_classes = self.classes_list.count() > 0
-        image_selected = self.get_selected_image_path() is not None
-        class_selected = self.get_selected_class_name() is not None
-        box_selected = self.image_canvas.selected_box_idx != -1
-        is_drawing = self.draw_box_btn.isChecked()
+    @pyqtSlot(str, bool)
+    def _update_window_title(self, project_path: str, is_dirty: bool):
+        """Updates the window title with project name and dirty status."""
+        title = self.base_window_title
+        if project_path != "Unsaved Project":
+             title = f"{os.path.basename(project_path)} - {title}"
+        if is_dirty:
+            title += " *"
+        self.setWindowTitle(title)
 
-        # Process button needs image and model
-        self.process_btn.setEnabled(image_selected and has_model and not is_drawing)
+    # --- Settings Persistence ---
+    def _write_settings(self):
+        """Save UI settings using QSettings."""
+        settings = QSettings()
+        settings.beginGroup("MainWindow")
+        settings.setValue("geometry", self.saveGeometry())
+        settings.setValue("state", self.saveState())
+        # Save splitter sizes
+        if hasattr(self, 'main_splitter'): # Check if splitter exists
+             settings.setValue("mainSplitter", self.main_splitter.saveState())
+        settings.endGroup()
 
-        # Class removal needs a selected class
-        self.remove_class_btn.setEnabled(class_selected and not is_drawing)
+        settings.beginGroup("UI")
+        settings.setValue("confThreshold", self.conf_spinbox.value())
+        settings.setValue("iouThreshold", self.iou_spinbox.value())
+        settings.setValue("trainSplit", self.train_split_spinbox.value())
+        settings.setValue("augmentCount", self.augmentations_spin.value())
+        # Last directories are saved by the dialog handlers
+        settings.endGroup()
 
-        # Augment/Save buttons require processed data (AppLogic controls these via explicit signals)
-        # self.augment_btn.setEnabled(...) # Controlled by AppLogic
-        # self.save_btn.setEnabled(...) # Controlled by AppLogic
+    def _read_settings(self):
+        """Load UI settings using QSettings."""
+        settings = QSettings()
+        settings.beginGroup("MainWindow")
+        geom = settings.value("geometry", QByteArray())
+        if geom and isinstance(geom, QByteArray) and not geom.isEmpty():
+             self.restoreGeometry(geom)
+        state = settings.value("state", QByteArray())
+        if state and isinstance(state, QByteArray) and not state.isEmpty():
+             self.restoreState(state)
+        # Restore splitter sizes
+        if hasattr(self, 'main_splitter'): # Check if splitter exists
+            splitter_state = settings.value("mainSplitter", QByteArray())
+            if splitter_state and isinstance(splitter_state, QByteArray) and not splitter_state.isEmpty():
+                self.main_splitter.restoreState(splitter_state)
+            else:
+                 # Apply default split if no saved state
+                 total_width = self.size().width() if self.size().width() > 200 else 1200 # Use default if size not reliable yet
+                 self.main_splitter.setSizes([int(total_width * 0.18), int(total_width * 0.60), int(total_width * 0.22)])
 
-        # Canvas controls
-        canvas_exists = self.image_canvas.pixmap is not None
-        self.zoom_in_btn.setEnabled(canvas_exists)
-        self.zoom_out_btn.setEnabled(canvas_exists)
-        self.fit_btn.setEnabled(canvas_exists)
-        self.draw_box_btn.setEnabled(canvas_exists) # Enable draw if image loaded
-        self.delete_box_btn.setEnabled(canvas_exists and box_selected and not is_drawing)
+        settings.endGroup()
 
-    # Style Sheet / Paint Event for minor tweaks if needed
-    # def paintEvent(self, event):
-    #     opt = QStyleOption()
-    #     opt.initFrom(self)
-    #     p = QPainter(self)
-    #     self.style().drawPrimitive(QStyle.PrimitiveElement.PE_Widget, opt, p, self)
+        settings.beginGroup("UI")
+        self.conf_spinbox.setValue(settings.value("confThreshold", 0.25, type=float))
+        self.iou_spinbox.setValue(settings.value("iouThreshold", 0.45, type=float))
+        self.train_split_spinbox.setValue(settings.value("trainSplit", 0.8, type=float))
+        self.augmentations_spin.setValue(settings.value("augmentCount", 0, type=int))
+        settings.endGroup()
+
+        # Trigger initial config emission after loading settings
+        self._on_config_changed()
+
+    # --- Close Event Handling ---
+    def closeEvent(self, event: QCloseEvent):
+        """Handle the window close event, checking for unsaved changes."""
+        if self._app_logic and self._app_logic._check_save_before_proceed():
+            self._write_settings() # Save settings on successful close
+            event.accept()
+        else:
+            event.ignore()

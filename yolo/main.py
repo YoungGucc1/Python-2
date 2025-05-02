@@ -26,6 +26,7 @@ def main():
     # Create the main window and application logic
     main_window = MainWindow()
     app_logic = AppLogic(main_window) # Pass main window instance to logic
+    main_window.set_app_logic(app_logic) # Give main window a reference back to logic
 
     # Show the main window
     main_window.show()

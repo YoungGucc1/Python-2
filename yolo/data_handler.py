@@ -7,9 +7,11 @@ import shutil
 import random
 import cv2
 import yaml
+import json
 import numpy as np
 from typing import List, Dict, Tuple, Optional, Callable
 from PyQt6.QtCore import QRect
+from pathlib import Path
 
 # Use local imports due to flat structure
 from utils import ensure_dir, xyxy_to_cxcywh_normalized, cxcywh_normalized_to_xyxy, clamp
@@ -28,6 +30,130 @@ class DataHandler:
         # {original_path: [(augmented_image_np, augmented_annotations_list), ...]}
         self.augmented_images: Dict[str, List[Tuple[np.ndarray, List[dict]]]] = {}
         self._image_dims_cache: Dict[str, Tuple[int, int]] = {} # Cache image dimensions (w, h)
+        self._dirty: bool = False # Track unsaved changes
+
+    # --- Dirty State Management ---
+    def set_dirty(self, dirty: bool = True):
+        self._dirty = dirty
+
+    def is_dirty(self) -> bool:
+        return self._dirty
+
+    # --- Helper to get relative path ---
+    def _get_relative_path(self, target_path: Optional[str], base_dir: Path) -> Optional[str]:
+        if target_path is None:
+            return None
+        try:
+            # Try to make path relative
+            relative_path = Path(os.path.relpath(target_path, base_dir))
+            return str(relative_path)
+        except ValueError:
+            # If paths are on different drives (Windows), keep absolute path
+            return target_path
+
+    # --- Helper to get absolute path ---
+    def _get_absolute_path(self, relative_or_absolute_path: Optional[str], base_dir: Path) -> Optional[str]:
+        if relative_or_absolute_path is None:
+            return None
+        path_obj = Path(relative_or_absolute_path)
+        if path_obj.is_absolute():
+            return str(path_obj)
+        else:
+            # Resolve relative path based on the project file's directory
+            absolute_path = (base_dir / path_obj).resolve()
+            return str(absolute_path)
+
+
+    # --- Project Save/Load ---
+    def save_project(self, file_path: str) -> bool:
+        """Save the current project state to a JSON file."""
+        project_file = Path(file_path)
+        base_dir = project_file.parent
+
+        # Prepare data for saving (using relative paths where possible)
+        project_data = {
+            "version": "0.1.0", # Project file format version
+            "model_path": self._get_relative_path(self.model_path, base_dir),
+            "class_names": self.class_names,
+            "image_data": {}
+        }
+
+        for img_path_abs in self.image_paths:
+             img_path_rel = self._get_relative_path(img_path_abs, base_dir)
+             if img_path_rel: # Only save if relative path could be determined
+                 project_data["image_data"][img_path_rel] = {
+                      "annotations": self.annotations.get(img_path_abs, [])
+                      # Note: Augmented data is not saved in the project file, it's regenerated
+                 }
+
+        try:
+            with open(project_file, 'w', encoding='utf-8') as f:
+                json.dump(project_data, f, indent=4)
+            self.set_dirty(False) # Mark as saved
+            print(f"Project saved successfully to {file_path}")
+            return True
+        except IOError as e:
+            print(f"Error saving project file {file_path}: {e}")
+            return False
+        except TypeError as e:
+            print(f"Error serializing project data to JSON: {e}")
+            return False
+
+    def load_project(self, file_path: str) -> bool:
+        """Load project state from a JSON file."""
+        project_file = Path(file_path)
+        if not project_file.is_file():
+            print(f"Error: Project file not found: {file_path}")
+            return False
+
+        base_dir = project_file.parent
+
+        try:
+            with open(project_file, 'r', encoding='utf-8') as f:
+                project_data = json.load(f)
+        except IOError as e:
+            print(f"Error reading project file {file_path}: {e}")
+            return False
+        except json.JSONDecodeError as e:
+            print(f"Error parsing project file {file_path}: {e}")
+            return False
+
+        # --- Clear existing data ---
+        self.image_paths = []
+        self.model_path = None
+        self.class_names = []
+        self.annotations = {}
+        self.augmented_images = {}
+        self._image_dims_cache = {}
+        self._dirty = False
+
+        # --- Load data from file ---
+        # Basic version check (optional but recommended)
+        file_version = project_data.get("version", "0.0.0")
+        # if file_version != "0.1.0":
+        #     print(f"Warning: Loading project file version {file_version}, expected 0.1.0. Compatibility issues may arise.")
+
+        self.class_names = project_data.get("class_names", [])
+        relative_model_path = project_data.get("model_path")
+        self.model_path = self._get_absolute_path(relative_model_path, base_dir)
+
+        image_data = project_data.get("image_data", {})
+        loaded_image_paths = []
+        for img_path_rel, data in image_data.items():
+            img_path_abs = self._get_absolute_path(img_path_rel, base_dir)
+            if img_path_abs and os.path.isfile(img_path_abs): # Check if file still exists
+                 if self._get_image_dims(img_path_abs) != (0, 0): # Check if readable
+                    loaded_image_paths.append(img_path_abs)
+                    self.annotations[img_path_abs] = data.get("annotations", [])
+                 else:
+                      print(f"Warning: Could not read dimensions for image {img_path_abs} referenced in project. Skipping.")
+            else:
+                 print(f"Warning: Image file not found: {img_path_abs} (relative: {img_path_rel}). Removing from project.")
+
+        self.image_paths = loaded_image_paths
+        self.set_dirty(False) # Mark as clean after load
+        print(f"Project loaded successfully from {file_path}")
+        return True
 
     def _get_image_dims(self, image_path: str) -> Tuple[int, int]:
         """Get image dimensions (width, height), using cache or loading."""
@@ -47,6 +173,7 @@ class DataHandler:
         """Add valid image files to the project."""
         added_count = 0
         current_paths = set(self.image_paths)
+        changed = False # Track if data actually changed
         for path in file_paths:
             if path not in current_paths and os.path.isfile(path):
                 # Basic check if it's an image (can be improved)
@@ -56,8 +183,10 @@ class DataHandler:
                         self.image_paths.append(path)
                         self.annotations[path] = [] # Initialize empty annotations
                         added_count += 1
+                        changed = True
                     else:
                          print(f"Warning: Could not read dimensions for {path}. Skipping.")
+        if changed: self.set_dirty()
         return added_count
 
     def remove_image(self, image_path: str) -> bool:
@@ -67,23 +196,33 @@ class DataHandler:
             self.annotations.pop(image_path, None)
             self.augmented_images.pop(image_path, None)
             self._image_dims_cache.pop(image_path, None)
+            self.set_dirty()
             return True
         return False
 
     def set_model_path(self, model_path: Optional[str]) -> bool:
         """Set the path to the YOLO model."""
+        new_path = None
         if model_path and os.path.isfile(model_path):
-            self.model_path = model_path
-            return True
+            new_path = model_path
         elif model_path is None:
-             self.model_path = None
-             return True # Allow clearing the model path
-        return False
+             new_path = None # Allow clearing
+
+        if new_path != self.model_path:
+            self.model_path = new_path
+            self.set_dirty()
+            return True
+        # If path is invalid but was provided, return False
+        if model_path and new_path is None:
+             return False
+        # If path is the same or clearing an already None path, return True (no change needed)
+        return True
 
     def add_class(self, class_name: str) -> bool:
         """Add a new class name if it doesn't exist."""
         if class_name and class_name not in self.class_names:
             self.class_names.append(class_name)
+            self.set_dirty()
             return True
         return False
 
@@ -126,6 +265,7 @@ class DataHandler:
                           new_aug_list.append( (img_data, updated_aug_anns) )
                      self.augmented_images[orig_path] = new_aug_list
 
+                self.set_dirty() # Mark dirty if class was successfully removed
                 return True
             except ValueError: # Should not happen if class_name in self.class_names
                 return False
@@ -161,7 +301,10 @@ class DataHandler:
             }
             new_annotations.append(annotation)
 
-        self.annotations[image_path] = new_annotations
+        # Only mark dirty if the new annotations are different from the old ones
+        if self.annotations.get(image_path) != new_annotations:
+             self.annotations[image_path] = new_annotations
+             self.set_dirty()
         return True
 
     def add_manual_box(self, image_path: str, box_rect_img_coords: QRect) -> int:
@@ -188,25 +331,32 @@ class DataHandler:
             'model_class_id': -1
         }
         self.annotations[image_path].append(annotation)
+        self.set_dirty()
         return len(self.annotations[image_path]) - 1 # Return index of the new box
 
 
     def assign_class_to_box(self, image_path: str, box_index: int, class_id: int) -> bool:
         """Assign a class_id to a specific bounding box."""
+        current_class_id = -2 # Use a value that class_id cannot be
         if (image_path in self.annotations and
-            0 <= box_index < len(self.annotations[image_path]) and
-            0 <= class_id < len(self.class_names)): # Ensure class_id is valid
+            0 <= box_index < len(self.annotations[image_path])):
+            current_class_id = self.annotations[image_path][box_index].get('class_id', -1)
 
-            self.annotations[image_path][box_index]['class_id'] = class_id
+        if current_class_id != class_id: # Check if assignment actually changes the class
+            if (0 <= class_id < len(self.class_names)): # Ensure class_id is valid
+                 self.annotations[image_path][box_index]['class_id'] = class_id
+                 self.set_dirty()
+                 return True
+            elif (class_id == -1): # Allow unassigning
+                 self.annotations[image_path][box_index]['class_id'] = -1
+                 self.set_dirty()
+                 return True
+
+            print(f"Warning: Failed to assign invalid class {class_id} to box {box_index} for image {image_path}")
+            return False
+        else:
+            # No change needed, assignment successful in the sense that the state is correct
             return True
-        elif (image_path in self.annotations and # Allow unassigning
-            0 <= box_index < len(self.annotations[image_path]) and
-            class_id == -1):
-             self.annotations[image_path][box_index]['class_id'] = -1
-             return True
-
-        print(f"Warning: Failed to assign class {class_id} to box {box_index} for image {image_path}")
-        return False
 
 
     def delete_box(self, image_path: str, box_index: int) -> bool:
@@ -214,22 +364,26 @@ class DataHandler:
          if (image_path in self.annotations and
              0 <= box_index < len(self.annotations[image_path])):
              del self.annotations[image_path][box_index]
+             self.set_dirty()
              return True
          return False
 
 
     def add_augmented_images(self, image_path: str, augmented_data: List[Tuple[np.ndarray, List[dict]]]):
-        """Store augmented images and their annotations."""
+        """Store augmented images and their annotations. Does not mark project as dirty."""
+        # Augmented images are considered transient and don't dirty the project file
         if image_path in self.image_paths:
             if image_path not in self.augmented_images:
                 self.augmented_images[image_path] = []
             self.augmented_images[image_path].extend(augmented_data)
+            # Do NOT set dirty here
             return True
         return False
 
     def clear_augmented_images(self):
-        """Clear all previously generated augmented images."""
+        """Clear all previously generated augmented images. Does not mark project as dirty."""
         self.augmented_images = {}
+        # Do NOT set dirty here
 
     def save_yolo_dataset(self, output_dir: str, train_split: float = 0.8,
                           progress_callback: Optional[Callable[[int, int, str], None]] = None) -> bool:

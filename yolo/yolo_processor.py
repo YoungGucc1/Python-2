@@ -36,6 +36,10 @@ class YoloProcessor:
         self.model_type: Optional[str] = None  # 'ultralytics', 'torch', 'onnx'
         self.class_names: List[str] = [] # Store class names from the model if available
 
+    def is_model_loaded(self) -> bool:
+        """Check if a model is currently loaded."""
+        return self.model is not None and self.model_type is not None
+
     def load_model(self, model_path: str) -> bool:
         """Load a YOLO model (.pt or .onnx)."""
         if not os.path.exists(model_path):

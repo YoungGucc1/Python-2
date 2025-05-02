@@ -7,6 +7,9 @@ import numpy as np
 import albumentations as A
 from typing import List, Tuple, Dict, Optional
 
+# Use local imports due to flat structure
+from utils import clamp
+
 class ImageAugmenter:
     """Handles image augmentation using Albumentations library."""
 
