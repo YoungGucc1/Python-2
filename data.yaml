@@ -1,0 +1,5 @@
+path: C:/Intel\yolo_dataset
+train: images\train
+val: images\val
+nc: 1
+names: ["\u041D\u0430\u0443\u0448\u043D\u0438\u043A\u0438"]

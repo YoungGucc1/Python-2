@@ -493,109 +493,115 @@ class MainWindow(QMainWindow):
         self.show() # Re-show to apply the flag change
 
 
-    def save_app_state(self):
-        # Only save JSON-serializable data
-        app_state = {
-            'coordinates': self.coordinates,
-            'min_delay': self.spin_min_delay.value() if hasattr(self, 'spin_min_delay') else 500,
-            'max_delay': self.spin_max_delay.value() if hasattr(self, 'spin_max_delay') else 2000,
-            'speed_factor': self.spin_speed_factor.value() if hasattr(self, 'spin_speed_factor') else 1,
-            'current_mode': self.current_mode,
-            'is_capturing': self.is_capturing,
-            'always_on_top': self.check_always_on_top.isChecked() if hasattr(self, 'check_always_on_top') else False
-        }
-        try:
-            with open(self.state_file, 'w', encoding='utf-8') as f:
-                json.dump(app_state, f, indent=2)
-        except Exception as e:
-            print(f"[ERROR] Failed to save app state: {e}")
-
-    def load_app_state(self):
-        # Load state from JSON and apply to UI, handle decode errors gracefully
-        if not os.path.exists(self.state_file):
-            return
-        try:
-            with open(self.state_file, 'r', encoding='utf-8') as f:
-                state = json.load(f)
-            # Coordinates
-            self.coordinates = state.get('coordinates', [])
-            self.list_coords.clear()
-            for coord in self.coordinates:
-                if isinstance(coord, (list, tuple)) and len(coord) == 2:
-                    self.list_coords.addItem(f"X: {coord[0]}, Y: {coord[1]}")
-            # Mode
-            mode = state.get('current_mode', self.MODE_CAPTURE)
-            if mode == self.MODE_CLICK:
-                self.radio_click.setChecked(True)
-                self.current_mode = self.MODE_CLICK
-            else:
-                self.radio_capture.setChecked(True)
-                self.current_mode = self.MODE_CAPTURE
-            # Delays
-            self.spin_min_delay.setValue(state.get('min_delay', 500))
-            self.spin_max_delay.setValue(state.get('max_delay', 2000))
-            self.spin_speed_factor.setValue(state.get('speed_factor', 1))
-            # Always on top
-            self.check_always_on_top.setChecked(state.get('always_on_top', False))
-            # Capture hotkey state
-            self.is_capturing = state.get('is_capturing', False)
-            if self.is_capturing:
-                self.btn_toggle_capture.setText("Stop Capture Hotkey (F6)")
-            else:
-                self.btn_toggle_capture.setText("Start Capture Hotkey (F6)")
-        except (json.JSONDecodeError, Exception) as e:
-            print(f"[ERROR] Failed to load app state: {e}. The state file may be corrupted. It will be ignored.")
-
-
     def closeEvent(self, event):
         self.save_app_state()
         # Optionally, clean up keyboard hooks (not strictly needed since daemon thread)
         if KEYBOARD_AVAILABLE:
             try:
-                keyboard.unhook_all_hotkeys()
-            except Exception:
-                pass
+                keyboard.unhook_all() # Clean up hooks
+            except Exception as e:
+                print(f"[WARNING] Could not unhook keyboard listeners: {e}")
         if self.clicker_thread and self.clicker_thread.isRunning():
-            self._update_status("Stopping clicker thread before exit...")
-            self.clicker_thread.stop()
-            # Wait briefly for the thread to potentially finish
-            # A more robust solution might use wait() but could hang GUI
-            # self.clicker_thread.wait(1000) # Wait max 1 sec
+            self._stop_clicking() # Ensure thread stops before closing
         event.accept()
 
+    # --- Global Hotkey Handling ---
 
-    # --- Placeholder for Hotkey Listener Setup (requires pynput) ---
-    # def _setup_hotkey_listener(self):
-    #     # This requires pynput installation and platform-specific considerations
-    #     # Example (conceptual):
-    #     # try:
-    #     #     from pynput import keyboard
-    #     #     def on_press(key):
-    #     #         if key == keyboard.Key.f6:
-    #     #             if self.current_mode == self.MODE_CAPTURE and self.is_capturing:
-    #     #                  # Need to signal main thread safely from listener thread
-    #     #                  QTimer.singleShot(0, self._capture_coordinate)
-    #     #
-    #     #     self.hotkey_listener = keyboard.Listener(on_press=on_press)
-    #     #     self.hotkey_listener.start() # Start in its own thread
-    #     #     self._update_status("Hotkey listener active (F6).")
-    #     # except ImportError:
-    #     #      self._update_status("pynput not installed. Hotkey disabled.")
-    #     # except Exception as e:
-    #     #      self._update_status(f"Failed to start hotkey listener: {e}")
-    #      pass # No hotkey functionality in this basic version
+    def _toggle_capture_hotkey_global(self):
+        """Helper function to toggle capture mode via global hotkey."""
+        # Simulate button toggle: call the original slot with the opposite of current state
+        current_state = self.btn_toggle_capture.isChecked()
+        self._toggle_capture_hotkey(not current_state)
 
-    # def _stop_hotkey_listener(self):
-    #      # if self.hotkey_listener:
-    #      #    self.hotkey_listener.stop()
-    #      #    self.hotkey_listener = None
-    #      pass
+
+    def _start_clicking_from_hotkey(self):
+        """Starts the clicking thread, intended for use by global hotkey (F5)."""
+        # Only start if not already running
+        if self.clicker_thread and self.clicker_thread.isRunning():
+            self._update_status("Clicking is already active.")
+            return
+
+        # Perform checks before starting
+        if not self.coordinates:
+            # Can't show QMessageBox from this thread directly
+            print("[WARNING] No Coordinates - cannot start clicking.")
+            self._update_status("Cannot start: No coordinates captured.")
+            return
+        if self.current_mode != self.MODE_CLICK:
+            print("[WARNING] Wrong Mode - cannot start clicking.")
+            self._update_status("Cannot start: Switch to Click Mode first.")
+            return
+
+        min_delay = self.spin_min_delay.value()
+        max_delay = self.spin_max_delay.value()
+        if min_delay > max_delay:
+            print("[WARNING] Invalid Settings - cannot start clicking.")
+            self._update_status("Cannot start: Min delay > Max delay.")
+            return
+
+        settings = {
+            'min_delay': min_delay,
+            'max_delay': max_delay,
+            'speed_factor': self.spin_speed_factor.value()
+        }
+
+        try:
+            self.clicker_thread = ClickerThread(list(self.coordinates), settings) # Pass a copy
+            self.clicker_thread.status_update.connect(self._update_status)
+            self.clicker_thread.finished.connect(self._handle_click_finished)
+            self.clicker_thread.start()
+
+            # Update UI elements (like button text/state) from main thread
+            # This needs to be done carefully, maybe via a custom signal
+            # or checking state in _update_ui_for_mode.
+            # For now, just update status.
+            self._update_status("Clicking started via hotkey.")
+            # Schedule a UI update on the main thread
+            QTimer.singleShot(0, self._update_ui_for_mode)
+            QTimer.singleShot(0, lambda: self.btn_toggle_click.setText("Stop Clicking"))
+
+
+        except Exception as e:
+            print(f"[ERROR] Failed to start clicker via hotkey: {e}")
+            self._update_status(f"Error starting clicker: {e}")
+            self.clicker_thread = None
+
 
     def _start_global_hotkeys(self):
-        # Register global hotkeys using the keyboard library
-        # Use QTimer.singleShot to safely call Qt slots from this thread
-        keyboard.add_hotkey('shift+p', lambda: QTimer.singleShot(0, self._pause_clicking))
-        keyboard.add_hotkey('shift+t', lambda: QTimer.singleShot(0, self._stop_clicking))
-        keyboard.add_hotkey('shift+c', lambda: QTimer.singleShot(0, self._capture_coordinate))
-        print("[INFO] Global hotkeys registered: Shift+P (Pause), Shift+T (Stop), Shift+C (Capture)")
-        keyboard.wait()  # Keeps the thread alive
+        """Register global hotkeys using the keyboard library.
+
+        This runs in a separate thread. GUI updates must be scheduled
+        on the main thread using QTimer.singleShot.
+        """
+        if not KEYBOARD_AVAILABLE:
+            return
+
+        print("[INFO] Starting global hotkey listener...")
+        try:
+            # Use lambda functions to wrap the QTimer call
+            # F5: Start/Toggle Clicking
+            keyboard.add_hotkey('f5', lambda: QTimer.singleShot(0, self._toggle_clicking))
+
+            # F6: Toggle Capture Mode
+            keyboard.add_hotkey('f6', lambda: QTimer.singleShot(0, self._toggle_capture_hotkey_global))
+
+            # F7: Pause Clicking
+            keyboard.add_hotkey('f7', lambda: QTimer.singleShot(0, self._pause_clicking))
+
+            # F8: Stop Clicking
+            keyboard.add_hotkey('f8', lambda: QTimer.singleShot(0, self._stop_clicking))
+
+            print("[INFO] Global hotkeys (F5, F6, F7, F8) registered.")
+            # Keep the listener thread alive. keyboard.wait() blocks until terminated.
+            # Since this runs in a daemon thread, it will exit automatically when the app closes.
+            # If the thread wasn't a daemon, keyboard.wait() would prevent app exit
+            # unless explicitly stopped (e.g., keyboard.unhook_all() in closeEvent).
+            # We'll add unhook_all in closeEvent for good measure.
+            keyboard.wait() # Blocks this thread, listening for keys
+
+        except Exception as e:
+            print(f"[ERROR] Failed to register global hotkeys: {e}")
+            print("         Try running the application with administrator/root privileges.")
+        finally:
+             # This might be reached if keyboard.wait() is interrupted, though unlikely here.
+             print("[INFO] Global hotkey listener stopped.")

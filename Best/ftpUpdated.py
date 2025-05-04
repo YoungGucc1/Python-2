@@ -7,6 +7,7 @@ import socket
 import ipaddress
 import time
 import datetime
+import configparser
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QLabel, QTreeWidget, QTreeWidgetItem, QHeaderView,
@@ -23,6 +24,7 @@ DEFAULT_HOST = "192.168.1.10"
 DEFAULT_PORT = "21"  # Standard FTP port
 DEFAULT_USER = "pc"
 DEFAULT_NETWORK = "192.168.1.0/24"
+SETTINGS_FILE = "settings.ini"
 
 # --- Icons (Placeholder - requires icon files or use built-in styles) ---
 # For a real app, replace these with paths to actual icon files or use QStyle standard icons
@@ -545,6 +547,7 @@ class FTPClientWindow(QMainWindow):
         self.current_remote_dir = "/"
         self.transfer_thread = None
         self.transfer_worker = None
+        self.last_transfer_action = None
         self.connect_thread = None
         self.connect_worker = None
         self.scan_thread = None
@@ -557,6 +560,7 @@ class FTPClientWindow(QMainWindow):
         self.setup_ui()
         self.apply_styles()
         self.connect_signals()
+        self.load_settings()
 
         self.refresh_local()
         self.update_ui_state() # Set initial button states etc.
@@ -576,16 +580,16 @@ class FTPClientWindow(QMainWindow):
         # Row 1: Host, Port, User, Password
         top_row_layout = QHBoxLayout()
         top_row_layout.addWidget(QLabel("Host:"))
-        self.host_entry = QLineEdit(DEFAULT_HOST)
+        self.host_entry = QLineEdit()
         top_row_layout.addWidget(self.host_entry, 2)  # Give host more space
         
         top_row_layout.addWidget(QLabel("Port:"))
-        self.port_entry = QLineEdit(DEFAULT_PORT)
+        self.port_entry = QLineEdit()
         self.port_entry.setMaximumWidth(60)
         top_row_layout.addWidget(self.port_entry)
         
         top_row_layout.addWidget(QLabel("User:"))
-        self.username_entry = QLineEdit(DEFAULT_USER)
+        self.username_entry = QLineEdit()
         top_row_layout.addWidget(self.username_entry, 1)
         
         top_row_layout.addWidget(QLabel("Password:"))
@@ -615,7 +619,7 @@ class FTPClientWindow(QMainWindow):
         bottom_row_layout.addStretch(1)  # Add space between encryption and network scan
         
         bottom_row_layout.addWidget(QLabel("Network:"))
-        self.network_entry = QLineEdit(DEFAULT_NETWORK)
+        self.network_entry = QLineEdit()
         self.network_entry.setToolTip("Enter network range (e.g., 192.168.1.0/24)")
         bottom_row_layout.addWidget(self.network_entry, 2)  # Give network field more space
         
@@ -1421,6 +1425,9 @@ class FTPClientWindow(QMainWindow):
          self.transfer_label.setText(f"{action.capitalize()}ing {filename}...")
          self.transfer_progress.setValue(0)
 
+         # Store the action before starting
+         self.last_transfer_action = action
+
          # Setup worker and thread
          self.transfer_thread = QThread(self)
          self.transfer_worker = TransferWorker(self.ftp, action, local_path, remote_path)
@@ -1486,11 +1493,12 @@ class FTPClientWindow(QMainWindow):
     @pyqtSlot(str)
     def on_transfer_finished(self, message):
         self.log(message, "success")
-        action = "upload" if "uploaded" in message.lower() else "download"
-        if action == 'upload':
-            self.refresh_remote() # Update remote list after successful upload
-        elif action == 'download':
-            self.refresh_local() # Update local list after successful download
+        # DO NOT refresh here - moved to on_transfer_thread_finished
+        # action = "upload" if "uploaded" in message.lower() else "download"
+        # if action == 'upload':
+        #     self.refresh_remote() # Update remote list after successful upload
+        # elif action == 'download':
+        #     self.refresh_local() # Update local list after successful download
         # Transfer completes implicitly via thread finish signal
 
 
@@ -1505,11 +1513,23 @@ class FTPClientWindow(QMainWindow):
     @pyqtSlot()
     def on_transfer_thread_finished(self):
         self.log("Transfer operation finished.", "debug")
+
+        # Refresh the appropriate view now that the thread is done
+        if self.last_transfer_action == 'upload':
+            self.refresh_remote()
+        elif self.last_transfer_action == 'download':
+            self.refresh_local()
+
+        # Clean up worker/thread
         if self.transfer_thread:
              self.transfer_thread.deleteLater()
-             self.transfer_worker.deleteLater()
+             # Ensure worker exists before trying to delete
+             if hasattr(self, 'transfer_worker') and self.transfer_worker:
+                 self.transfer_worker.deleteLater()
         self.transfer_thread = None
         self.transfer_worker = None
+        self.last_transfer_action = None # Reset last action
+
         self.update_ui_state() # Re-enable buttons, hide progress etc.
 
 
@@ -1611,10 +1631,61 @@ class FTPClientWindow(QMainWindow):
         self.scan_worker = None
         self.scan_btn.setEnabled(True) # Re-enable scan button
 
+    # Add load_settings method
+    def load_settings(self):
+        config = configparser.ConfigParser()
+        # Set default values first
+        host = DEFAULT_HOST
+        port = DEFAULT_PORT
+        user = DEFAULT_USER
+        network = DEFAULT_NETWORK
+        tls_index = 0 # Default to "None (Insecure)"
+
+        if os.path.exists(SETTINGS_FILE):
+            try:
+                config.read(SETTINGS_FILE)
+                if 'Connection' in config:
+                    host = config['Connection'].get('Host', DEFAULT_HOST)
+                    port = config['Connection'].get('Port', DEFAULT_PORT)
+                    user = config['Connection'].get('User', DEFAULT_USER)
+                    network = config['Connection'].get('Network', DEFAULT_NETWORK)
+                    tls_index = config['Connection'].getint('TLSIndex', 0)
+                    # Ensure index is valid
+                    if not 0 <= tls_index < self.tls_combo.count():
+                         tls_index = 0
+                self.log(f"Loaded settings from {SETTINGS_FILE}", "info")
+            except Exception as e:
+                self.log(f"Error loading settings from {SETTINGS_FILE}: {e}", "error")
+                # Fallback to defaults is handled by initial variable assignments
+
+        # Apply loaded/default values to UI
+        self.host_entry.setText(host)
+        self.port_entry.setText(port)
+        self.username_entry.setText(user)
+        self.network_entry.setText(network)
+        self.tls_combo.setCurrentIndex(tls_index)
+
+    # Add save_settings method
+    def save_settings(self):
+        config = configparser.ConfigParser()
+        config['Connection'] = {
+            'Host': self.host_entry.text(),
+            'Port': self.port_entry.text(),
+            'User': self.username_entry.text(),
+            'Network': self.network_entry.text(),
+            'TLSIndex': str(self.tls_combo.currentIndex())
+        }
+        try:
+            with open(SETTINGS_FILE, 'w') as configfile:
+                config.write(configfile)
+            self.log(f"Saved settings to {SETTINGS_FILE}", "info")
+        except Exception as e:
+            self.log(f"Error saving settings to {SETTINGS_FILE}: {e}", "error")
+
 
     # --- Window Closing ---
     def closeEvent(self, event):
-        """ Handle window close: disconnect, stop threads. """
+        """ Handle window close: disconnect, stop threads, save settings. """
         if self.transfer_thread and self.transfer_thread.isRunning():
             reply = QMessageBox.question(self, "Transfer Active",
                                          "A file transfer is in progress. Quit anyway?",
@@ -1634,15 +1705,21 @@ class FTPClientWindow(QMainWindow):
 
         # Disconnect if connected
         if self.ftp:
-            self.disconnect_ftp() # This uses a timer, might not finish immediately
-            # Force clear ftp object here for safety on close
-            self.ftp = None
+            # Use a direct disconnect here for simplicity on close, avoid timer
+            try:
+                self.ftp.quit()
+            except Exception: pass # Ignore errors on quit
+            finally:
+                self.ftp = None
 
         # Clean up any remaining thread objects (should be handled by finished signals ideally)
         for thread in [self.connect_thread, self.transfer_thread, self.scan_thread]:
             if thread and thread.isRunning():
                 thread.quit()
                 thread.wait(500) # Wait briefly
+
+        # Save settings before accepting close
+        self.save_settings()
 
         event.accept()
 

@@ -11,6 +11,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QSize, QSettings, QCoreApplication, QDir, QPoint, QByteArray, pyqtSlot
 from PyQt6.QtGui import QIcon, QPainter, QColor, QPalette, QAction, QCloseEvent
+from typing import Dict
 
 # Use local imports due to flat structure
 from image_canvas import ImageCanvas
@@ -31,6 +32,7 @@ class MainWindow(QMainWindow):
     configChanged = pyqtSignal(dict)            # Emits dict of config values (conf, iou, split)
     drawBoxClicked = pyqtSignal(bool)           # Emits True when Draw Box is toggled on, False off
     deleteSelectedBoxClicked = pyqtSignal()
+    augmentationOptionsChanged = pyqtSignal(dict) # New signal
 
     # --- Signals for Project Operations (Emitted TO AppLogic) ---
     newProjectRequested = pyqtSignal()
@@ -45,6 +47,7 @@ class MainWindow(QMainWindow):
         self.base_window_title = "YOLO Dataset Creator (PyQt6)"
         self.setWindowTitle(self.base_window_title)
         # self.resize(1300, 850) # Size will be handled by QSettings
+        self.augment_actions: Dict[str, QAction] = {} # To store augmentation actions
 
         self._create_actions() # Now creates menu actions
         self._create_menu()
@@ -89,13 +92,9 @@ class MainWindow(QMainWindow):
         self.exit_action.setStatusTip("Exit the application")
         self.exit_action.triggered.connect(self.close) # Triggers closeEvent
 
-        # --- Edit Actions (Placeholder) ---
-        # self.undo_action = ...
-        # self.redo_action = ...
-
-        # --- View Actions (Placeholder) ---
-        # self.zoom_in_action = ...
-        # self.zoom_out_action = ...
+        # --- Augmentation Actions (Dynamically created later) ---
+        # Placeholder, will be populated in _create_menu based on augmenter options
+        pass
 
     def _create_menu(self):
         """Create the main menu bar."""
@@ -109,6 +108,10 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.save_as_action)
         file_menu.addSeparator()
         file_menu.addAction(self.exit_action)
+
+        # --- Augmentations Menu --- #
+        self.augment_menu = menu_bar.addMenu("&Augmentations")
+        self.augment_menu.setEnabled(False)
 
         # Edit Menu (Placeholder)
         # edit_menu = menu_bar.addMenu("&Edit")
@@ -553,6 +556,7 @@ class MainWindow(QMainWindow):
         self.new_action.setEnabled(not is_processing)
         self.open_action.setEnabled(not is_processing)
         # self.exit_action always enabled
+        self.augment_menu.setEnabled(not is_processing) # Disable menu during processing
 
     @pyqtSlot(str, bool)
     def _update_window_title(self, project_path: str, is_dirty: bool):
@@ -584,6 +588,12 @@ class MainWindow(QMainWindow):
         # Last directories are saved by the dialog handlers
         settings.endGroup()
 
+        # Save Augmentation Options
+        settings.beginGroup("AugmentationOptions")
+        for name, action in self.augment_actions.items():
+            settings.setValue(name, action.isChecked())
+        settings.endGroup()
+
     def _read_settings(self):
         """Load UI settings using QSettings."""
         settings = QSettings()
@@ -613,8 +623,32 @@ class MainWindow(QMainWindow):
         self.augmentations_spin.setValue(settings.value("augmentCount", 0, type=int))
         settings.endGroup()
 
-        # Trigger initial config emission after loading settings
+        # NOTE: Augmentation settings are read AFTER the menu is populated
+        # in _read_augmentation_settings called from populate_augment_menu
+
+        # Trigger initial config emission after loading general UI settings
         self._on_config_changed()
+
+    def _read_augmentation_settings(self):
+        """Load augmentation option states AFTER menu actions are created."""
+        settings = QSettings()
+        settings.beginGroup("AugmentationOptions")
+        options_changed = False
+        current_options = {}
+        if not hasattr(self, 'augment_actions') or not self.augment_actions:
+             print("Warning: Trying to read augmentation settings before actions are created.")
+             settings.endGroup()
+             return
+
+        for name, action in self.augment_actions.items():
+            # Default to the action's initial state if setting not found
+            default_value = action.isChecked()
+            is_checked = settings.value(name, default_value, type=bool)
+            if action.isChecked() != is_checked:
+                 action.setChecked(is_checked)
+            current_options[name] = is_checked
+
+        settings.endGroup()
 
     # --- Close Event Handling ---
     def closeEvent(self, event: QCloseEvent):
@@ -624,3 +658,22 @@ class MainWindow(QMainWindow):
             event.accept()
         else:
             event.ignore()
+
+    def populate_augment_menu(self, aug_options: Dict[str, bool]):
+        """Populate the Augmentations menu with checkable actions."""
+        self.augment_menu.clear() # Clear any previous items
+        self.augment_actions = {}
+        for name, is_checked in aug_options.items():
+            action = QAction(name, self, checkable=True)
+            action.setChecked(is_checked)
+            action.triggered.connect(self._on_augmentation_option_changed)
+            self.augment_menu.addAction(action)
+            self.augment_actions[name] = action
+        self.augment_menu.setEnabled(True) # Enable the menu now
+        # Read settings again specifically for augmentation options AFTER populating
+        self._read_augmentation_settings()
+
+    def _on_augmentation_option_changed(self):
+        """Called when any augmentation checkable action is toggled."""
+        current_options = {name: action.isChecked() for name, action in self.augment_actions.items()}
+        self.augmentationOptionsChanged.emit(current_options)

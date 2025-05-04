@@ -193,6 +193,13 @@ class AppLogic(QObject):
         self._current_worker: Optional[QThread] = None
         self.current_project_path: Optional[str] = None
 
+        # Get initial/default aug options and populate menu
+        initial_aug_options = self.image_augmenter.get_augmentation_options()
+        self.main_window.populate_augment_menu(initial_aug_options)
+        # Note: MainWindow._read_augmentation_settings will override defaults if settings exist
+        # Now read the *actual* initial state from the UI (which includes loaded settings)
+        self._update_augmenter_from_ui()
+
         self._connect_signals()
         self._update_ui_state() # Initial UI state
 
@@ -215,6 +222,7 @@ class AppLogic(QObject):
         mw.deleteSelectedBoxClicked.connect(self._on_delete_selected_box)
         mw.image_canvas.newBoxDrawn.connect(self._on_new_box_drawn)
         mw.image_canvas.boxSelected.connect(self._on_box_selected_in_canvas)
+        mw.augmentationOptionsChanged.connect(self._on_augmentation_options_changed) # Connect new signal
 
         # Add connections for project file operations (assuming MainWindow emits these)
         mw.openProjectRequested.connect(self.open_project)
@@ -586,6 +594,20 @@ class AppLogic(QObject):
         else:
              self.statusChanged.emit("No box selected to delete.", 3000)
 
+    @pyqtSlot(dict)
+    def _on_augmentation_options_changed(self, options: dict):
+        """Updates the image augmenter when UI options change."""
+        self.image_augmenter.update_transform(options)
+        # Maybe mark project dirty if aug options should be saved with project?
+        # For now, treating them as UI settings saved separately.
+
+    def _update_augmenter_from_ui(self):
+         """Ensures the augmenter's state matches the UI's initial state (after settings load)."""
+         if hasattr(self.main_window, 'augment_actions'): # Check if menu populated
+              current_ui_options = {name: action.isChecked()
+                                    for name, action in self.main_window.augment_actions.items()}
+              if current_ui_options:
+                  self.image_augmenter.update_transform(current_ui_options)
 
     # --- Worker Signal Handlers ---
 
