@@ -9,10 +9,13 @@ from datetime import datetime
 import webbrowser
 from PIL import Image, ImageTk
 import io
+from dotenv import load_dotenv
+
+load_dotenv() # Load variables from .env file
 
 # Replace with your Google API key and Custom Search Engine ID
-API_KEY = 'AIzaSyDKkI4mO8zZ_XgUcCSksUvR1wSrIQ1bWck'
-CSE_ID = "140ad6cab866c40cf"
+API_KEY = os.getenv("API_KEY")
+CSE_ID = os.getenv("CSE_ID")
 
 # Global variables for controlling the search
 is_paused = False
@@ -31,7 +34,14 @@ COLORS = {
     "text_light": "#ffffff"    # White
 }
 
-def search_images(query, num_results=10):
+# Define filter options
+IMG_SIZE_OPTIONS = ["any", "huge", "icon", "large", "medium", "small", "xlarge", "xxlarge"]
+IMG_TYPE_OPTIONS = ["any", "clipart", "face", "lineart", "stock", "photo", "animated"]
+IMG_COLOR_TYPE_OPTIONS = ["any", "color", "gray", "mono"]
+FILE_TYPE_OPTIONS = ["any", "bmp", "gif", "jpg", "png", "svg", "webp"] # Added webp
+SAFE_SEARCH_OPTIONS = ["off", "active", "high", "medium"]
+
+def search_images(query, num_results=10, img_size="any", img_type="any", img_color_type="any", file_type="any", safe_search="off"):
     url = f"https://customsearch.googleapis.com/customsearch/v1"
     params = {
         'q': query,
@@ -40,6 +50,19 @@ def search_images(query, num_results=10):
         'searchType': 'image',
         'num': num_results
     }
+
+    # Add filters if they are not "any" or "off" (for safe search)
+    if img_size != "any":
+        params['imgSize'] = img_size.upper() # API expects uppercase for some
+    if img_type != "any":
+        params['imgType'] = img_type
+    if img_color_type != "any":
+        params['imgColorType'] = img_color_type
+    if file_type != "any":
+        params['fileType'] = file_type
+    if safe_search != "off": # "off" is the default, no need to send
+        params['safe'] = safe_search
+
     response = requests.get(url, params=params)
     if response.status_code == 200:
         return response.json().get('items', [])
@@ -138,6 +161,13 @@ def on_search():
         search_button.config(state=tk.NORMAL)
         return
     
+    # Get filter values
+    selected_img_size = img_size_combobox.get()
+    selected_img_type = img_type_combobox.get()
+    selected_img_color_type = img_color_type_combobox.get()
+    selected_file_type = file_type_combobox.get()
+    selected_safe_search = safe_search_combobox.get()
+
     # Get number of images
     try:
         num_images = int(num_images_entry.get())
@@ -169,7 +199,15 @@ def on_search():
                 
             if query.strip():
                 log(f"🔍 Searching for: {query}", "heading")
-                image_items = search_images(query, num_images)
+                image_items = search_images(
+                    query,
+                    num_images,
+                    img_size=selected_img_size,
+                    img_type=selected_img_type,
+                    img_color_type=selected_img_color_type,
+                    file_type=selected_file_type,
+                    safe_search=selected_safe_search
+                )
                 
                 if image_items:
                     log(f"Found {len(image_items)} images for '{query}'", "info")
@@ -280,6 +318,14 @@ style.configure("TProgressbar",
                 thickness=25,
                 troughcolor=COLORS["bg_light"],
                 background=COLORS["primary"])
+style.configure("TCombobox",
+                fieldbackground="white",
+                background=COLORS["bg_light"],
+                foreground=COLORS["text_dark"],
+                arrowcolor=COLORS["primary"],
+                selectbackground=COLORS["primary"],
+                selectforeground="white")
+style.map('TCombobox', fieldbackground=[('readonly', 'white')])
 
 # Create custom fonts
 title_font = ("Helvetica", 16, "bold")
@@ -337,6 +383,29 @@ settings_frame = tk.LabelFrame(left_panel, text="Settings",
                               padx=10, pady=10)
 settings_frame.pack(fill=tk.X, pady=(0, 10))
 
+# Helper function to create filter dropdowns
+def create_filter_dropdown(parent, label_text, options_list):
+    frame = tk.Frame(parent, bg=COLORS["bg_light"])
+    frame.pack(fill=tk.X, pady=2)
+    
+    label = tk.Label(frame, 
+                     text=label_text,
+                     bg=COLORS["bg_light"],
+                     fg=COLORS["text_dark"],
+                     font=normal_font,
+                     width=25,  # Adjusted width
+                     anchor=tk.W)
+    label.pack(side=tk.LEFT, padx=(0, 10))
+    
+    combobox = ttk.Combobox(frame, 
+                            values=options_list,
+                            font=normal_font,
+                            state="readonly", # Make it non-editable
+                            width=15) # Adjusted width
+    combobox.current(0)  # Set default to the first option ("any" or "off")
+    combobox.pack(side=tk.LEFT, fill=tk.X, expand=True)
+    return combobox
+
 # Number of images
 num_images_frame = tk.Frame(settings_frame, bg=COLORS["bg_light"])
 num_images_frame.pack(fill=tk.X, pady=5)
@@ -357,6 +426,13 @@ num_images_entry = tk.Entry(num_images_frame,
                            width=10)
 num_images_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
 num_images_entry.insert(0, "10")
+
+# Add filter dropdowns
+img_size_combobox = create_filter_dropdown(settings_frame, "Image Size:", IMG_SIZE_OPTIONS)
+img_type_combobox = create_filter_dropdown(settings_frame, "Image Type:", IMG_TYPE_OPTIONS)
+img_color_type_combobox = create_filter_dropdown(settings_frame, "Image Color Type:", IMG_COLOR_TYPE_OPTIONS)
+file_type_combobox = create_filter_dropdown(settings_frame, "File Type:", FILE_TYPE_OPTIONS)
+safe_search_combobox = create_filter_dropdown(settings_frame, "Safe Search:", SAFE_SEARCH_OPTIONS)
 
 # Save directory
 save_dir_frame = tk.Frame(settings_frame, bg=COLORS["bg_light"])
@@ -499,6 +575,7 @@ log("🔎 Welcome to the Modern Image Search Tool!", "heading")
 log("• Enter search terms (one per line) in the text box", "info")
 log("• Set the number of images to download", "info")
 log("• Choose a save directory", "info")
+log("• Optionally, select search filters", "info")
 log("• Click 'Search and Save Images' to begin", "info")
 log("\nReady to search! Enter your queries and start.", "success")
 
